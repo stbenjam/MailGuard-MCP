@@ -1,5 +1,10 @@
 # MailGuard MCP
 
+> ⚠️ **Experimental — use at your own risk.** This is a toy prototype built to
+> explore how to safely connect untrusted data sources (like email) to LLMs. It
+> is not production-ready and comes with no guarantees. Use it to learn, not to
+> depend on.
+
 An MCP server that gives LLMs access to your email — without giving them a
 reason to regret it.
 
