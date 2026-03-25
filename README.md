@@ -105,7 +105,8 @@ If something goes wrong, there's a trail.
 
 | Tool | Description |
 |------|-------------|
-| `get_unread_emails` | List unread emails. Trusted senders show full details; untrusted show only a sanitized address. |
+| `fetch_mail` | Fetch emails from the inbox. Params: `since` (e.g. "24h", "7d", default "24h"), `read` (include read mail, default false). |
+| `search_mail` | Search emails by query. Params: `query` (required), `since` (default "7d"), `read` (default true). |
 | `trust_sender` | Add an email address or `@domain` to the trusted list. |
 | `untrust_sender` | Remove an address or domain from the trusted list. |
 | `fetch_message` | Get the plain-text body of an email. Trusted senders only. |

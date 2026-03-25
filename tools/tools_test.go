@@ -14,15 +14,23 @@ import (
 )
 
 type mockProvider struct {
-	envelopes   []provider.EmailEnvelope
-	bodies      map[string]*provider.EmailBody
-	attachments map[string]map[string][]byte
+	envelopes      []provider.EmailEnvelope
+	bodies         map[string]*provider.EmailBody
+	attachments    map[string]map[string][]byte
+	lastFetchOpts  *provider.FetchOptions
+	lastSearchOpts *provider.SearchOptions
 }
 
 func (m *mockProvider) Connect() error { return nil }
 func (m *mockProvider) Close() error   { return nil }
 
-func (m *mockProvider) GetUnreadMessages() ([]provider.EmailEnvelope, error) {
+func (m *mockProvider) FetchMail(opts provider.FetchOptions) ([]provider.EmailEnvelope, error) {
+	m.lastFetchOpts = &opts
+	return m.envelopes, nil
+}
+
+func (m *mockProvider) SearchMail(opts provider.SearchOptions) ([]provider.EmailEnvelope, error) {
+	m.lastSearchOpts = &opts
 	return m.envelopes, nil
 }
 
@@ -60,8 +68,10 @@ func callTool(h *Handler, name string, args map[string]any) (*mcp.CallToolResult
 	ctx := context.Background()
 
 	switch name {
-	case "get_unread_emails":
-		return h.getUnreadEmails(ctx, req)
+	case "fetch_mail":
+		return h.fetchMail(ctx, req)
+	case "search_mail":
+		return h.searchMail(ctx, req)
 	case "trust_sender":
 		return h.trustSender(ctx, req)
 	case "untrust_sender":
@@ -83,7 +93,9 @@ func resultText(r *mcp.CallToolResult) string {
 	return ""
 }
 
-func TestGetUnreadEmails_TrustedAndUntrusted(t *testing.T) {
+// --- fetch_mail tests ---
+
+func TestFetchMail_TrustedAndUntrusted(t *testing.T) {
 	mp := &mockProvider{
 		envelopes: []provider.EmailEnvelope{
 			{MessageID: "msg1", From: "trusted@example.com", Subject: "Hello", Date: time.Date(2026, 3, 24, 10, 0, 0, 0, time.UTC)},
@@ -94,7 +106,7 @@ func TestGetUnreadEmails_TrustedAndUntrusted(t *testing.T) {
 	h := newTestHandler(t, mp)
 	h.trustStore.Add("trusted@example.com")
 
-	result, err := callTool(h, "get_unread_emails", nil)
+	result, err := callTool(h, "fetch_mail", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +127,46 @@ func TestGetUnreadEmails_TrustedAndUntrusted(t *testing.T) {
 	}
 }
 
-func TestGetUnreadEmails_ReplyToWarning(t *testing.T) {
+func TestFetchMail_DefaultSince(t *testing.T) {
+	mp := &mockProvider{}
+	h := newTestHandler(t, mp)
+
+	callTool(h, "fetch_mail", nil)
+
+	if mp.lastFetchOpts == nil {
+		t.Fatal("expected FetchMail to be called")
+	}
+	// Default since is 24h, so Since should be roughly 24h ago
+	expectedSince := time.Now().Add(-24 * time.Hour)
+	diff := mp.lastFetchOpts.Since.Sub(expectedSince)
+	if diff < -time.Second || diff > time.Second {
+		t.Errorf("expected Since ~24h ago, got %v", mp.lastFetchOpts.Since)
+	}
+	if mp.lastFetchOpts.IncludeRead {
+		t.Error("expected IncludeRead=false by default")
+	}
+}
+
+func TestFetchMail_WithSinceAndRead(t *testing.T) {
+	mp := &mockProvider{}
+	h := newTestHandler(t, mp)
+
+	callTool(h, "fetch_mail", map[string]any{"since": "7d", "read": true})
+
+	if mp.lastFetchOpts == nil {
+		t.Fatal("expected FetchMail to be called")
+	}
+	expectedSince := time.Now().Add(-7 * 24 * time.Hour)
+	diff := mp.lastFetchOpts.Since.Sub(expectedSince)
+	if diff < -time.Second || diff > time.Second {
+		t.Errorf("expected Since ~7d ago, got %v", mp.lastFetchOpts.Since)
+	}
+	if !mp.lastFetchOpts.IncludeRead {
+		t.Error("expected IncludeRead=true")
+	}
+}
+
+func TestFetchMail_ReplyToWarning(t *testing.T) {
 	mp := &mockProvider{
 		envelopes: []provider.EmailEnvelope{
 			{MessageID: "msg1", From: "trusted@example.com", ReplyTo: "attacker@evil.com", Subject: "Hey", Date: time.Now()},
@@ -125,7 +176,7 @@ func TestGetUnreadEmails_ReplyToWarning(t *testing.T) {
 	h := newTestHandler(t, mp)
 	h.trustStore.Add("trusted@example.com")
 
-	result, _ := callTool(h, "get_unread_emails", nil)
+	result, _ := callTool(h, "fetch_mail", nil)
 	text := resultText(result)
 
 	if !strings.Contains(text, "WARNING: Reply-To") {
@@ -133,17 +184,199 @@ func TestGetUnreadEmails_ReplyToWarning(t *testing.T) {
 	}
 }
 
-func TestGetUnreadEmails_NoMessages(t *testing.T) {
+func TestFetchMail_NoMessages(t *testing.T) {
 	mp := &mockProvider{}
 	h := newTestHandler(t, mp)
 
-	result, _ := callTool(h, "get_unread_emails", nil)
+	result, _ := callTool(h, "fetch_mail", nil)
 	text := resultText(result)
 
-	if text != "No unread emails." {
-		t.Errorf("expected 'No unread emails.', got %q", text)
+	if text != "No emails found." {
+		t.Errorf("expected 'No emails found.', got %q", text)
 	}
 }
+
+func TestFetchMail_Limit(t *testing.T) {
+	var envelopes []provider.EmailEnvelope
+	for i := 0; i < 10; i++ {
+		envelopes = append(envelopes, provider.EmailEnvelope{
+			MessageID: fmt.Sprintf("msg%d", i),
+			From:      "trusted@example.com",
+			Subject:   fmt.Sprintf("Email %d", i),
+			Date:      time.Now(),
+		})
+	}
+
+	mp := &mockProvider{envelopes: envelopes}
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("trusted@example.com")
+
+	result, _ := callTool(h, "fetch_mail", map[string]any{"limit": 3})
+	text := resultText(result)
+
+	if !strings.Contains(text, "Results limited to 3 messages") {
+		t.Error("expected truncation notice")
+	}
+	// Should have exactly 3 "From:" lines
+	count := strings.Count(text, "From: trusted@example.com")
+	if count != 3 {
+		t.Errorf("expected 3 results, got %d", count)
+	}
+}
+
+func TestFetchMail_DefaultLimitNotShownWhenUnderLimit(t *testing.T) {
+	mp := &mockProvider{
+		envelopes: []provider.EmailEnvelope{
+			{MessageID: "msg1", From: "trusted@example.com", Subject: "Hello", Date: time.Now()},
+		},
+	}
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("trusted@example.com")
+
+	result, _ := callTool(h, "fetch_mail", nil)
+	text := resultText(result)
+
+	if strings.Contains(text, "Results limited") {
+		t.Error("should not show truncation notice when under limit")
+	}
+}
+
+func TestFetchMail_InvalidSince(t *testing.T) {
+	mp := &mockProvider{}
+	h := newTestHandler(t, mp)
+
+	result, _ := callTool(h, "fetch_mail", map[string]any{"since": "garbage"})
+	if !result.IsError {
+		t.Error("expected error for invalid since")
+	}
+}
+
+// --- search_mail tests ---
+
+func TestSearchMail_PassesQuery(t *testing.T) {
+	mp := &mockProvider{}
+	h := newTestHandler(t, mp)
+
+	callTool(h, "search_mail", map[string]any{"query": "invoice"})
+
+	if mp.lastSearchOpts == nil {
+		t.Fatal("expected SearchMail to be called")
+	}
+	if mp.lastSearchOpts.Query != "invoice" {
+		t.Errorf("expected query 'invoice', got %q", mp.lastSearchOpts.Query)
+	}
+}
+
+func TestSearchMail_DefaultsSince7dReadTrue(t *testing.T) {
+	mp := &mockProvider{}
+	h := newTestHandler(t, mp)
+
+	callTool(h, "search_mail", map[string]any{"query": "test"})
+
+	if mp.lastSearchOpts == nil {
+		t.Fatal("expected SearchMail to be called")
+	}
+	expectedSince := time.Now().Add(-7 * 24 * time.Hour)
+	diff := mp.lastSearchOpts.Since.Sub(expectedSince)
+	if diff < -time.Second || diff > time.Second {
+		t.Errorf("expected Since ~7d ago, got %v", mp.lastSearchOpts.Since)
+	}
+	if !mp.lastSearchOpts.IncludeRead {
+		t.Error("expected IncludeRead=true by default for search")
+	}
+}
+
+func TestSearchMail_TrustedAndUntrusted(t *testing.T) {
+	mp := &mockProvider{
+		envelopes: []provider.EmailEnvelope{
+			{MessageID: "msg1", From: "trusted@example.com", Subject: "Invoice #123", Date: time.Now()},
+			{MessageID: "msg2", From: "untrusted@evil.com", Subject: "Fake invoice", Date: time.Now()},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("trusted@example.com")
+
+	result, _ := callTool(h, "search_mail", map[string]any{"query": "invoice"})
+	text := resultText(result)
+
+	if !strings.Contains(text, "Subject: Invoice #123") {
+		t.Error("expected trusted sender subject in results")
+	}
+	if strings.Contains(text, "Fake invoice") {
+		t.Error("untrusted sender subject should be redacted in search results")
+	}
+	if !strings.Contains(text, "<untrusted_sender>untrusted@evil.com</untrusted_sender>") {
+		t.Error("expected untrusted sender in tags")
+	}
+}
+
+func TestSearchMail_NoResults(t *testing.T) {
+	mp := &mockProvider{}
+	h := newTestHandler(t, mp)
+
+	result, _ := callTool(h, "search_mail", map[string]any{"query": "nonexistent"})
+	text := resultText(result)
+
+	if text != "No emails found matching the search." {
+		t.Errorf("expected no results message, got %q", text)
+	}
+}
+
+func TestFetchMail_BulkMailIndicator(t *testing.T) {
+	mp := &mockProvider{
+		envelopes: []provider.EmailEnvelope{
+			{MessageID: "msg1", From: "newsletter@example.com", Subject: "Weekly digest", Date: time.Now(), IsBulk: true, ListUnsubscribe: "https://example.com/unsub"},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("newsletter@example.com")
+
+	result, _ := callTool(h, "fetch_mail", nil)
+	text := resultText(result)
+
+	if !strings.Contains(text, "[Bulk/List mail]") {
+		t.Error("expected bulk mail indicator")
+	}
+	if !strings.Contains(text, "Unsubscribe: https://example.com/unsub") {
+		t.Error("expected unsubscribe URL")
+	}
+}
+
+// --- parseSince tests ---
+
+func TestParseSince(t *testing.T) {
+	tests := []struct {
+		input string
+		want  time.Duration
+		err   bool
+	}{
+		{"1h", time.Hour, false},
+		{"24h", 24 * time.Hour, false},
+		{"7d", 7 * 24 * time.Hour, false},
+		{"30d", 30 * 24 * time.Hour, false},
+		{"30m", 30 * time.Minute, false},
+		{"", 24 * time.Hour, false},
+		{"garbage", 0, true},
+		{"xd", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := parseSince(tt.input)
+			if (err != nil) != tt.err {
+				t.Errorf("parseSince(%q) error = %v, wantErr %v", tt.input, err, tt.err)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("parseSince(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- trust/untrust tests ---
 
 func TestTrustSender(t *testing.T) {
 	mp := &mockProvider{}
@@ -203,6 +436,8 @@ func TestUntrustSender(t *testing.T) {
 		t.Error("expected sender to be untrusted")
 	}
 }
+
+// --- fetch_message tests ---
 
 func TestFetchMessage_Trusted(t *testing.T) {
 	mp := &mockProvider{
@@ -281,6 +516,8 @@ func TestFetchMessage_ContentSanitization(t *testing.T) {
 		t.Error("expected system tags to be stripped")
 	}
 }
+
+// --- fetch_attachment tests ---
 
 func TestFetchAttachment_Trusted(t *testing.T) {
 	mp := &mockProvider{

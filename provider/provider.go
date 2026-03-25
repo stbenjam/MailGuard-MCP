@@ -9,13 +9,15 @@ type Attachment struct {
 }
 
 type EmailEnvelope struct {
-	MessageID   string
-	From        string
-	Subject     string
-	Date        time.Time
-	UID         uint32
-	ReplyTo     string
-	Attachments []Attachment
+	MessageID       string
+	From            string
+	Subject         string
+	Date            time.Time
+	UID             uint32
+	ReplyTo         string
+	Attachments     []Attachment
+	ListUnsubscribe string // Normalized unsubscribe URL, if present and valid
+	IsBulk          bool   // True if message has bulk/list mail indicators
 }
 
 type EmailBody struct {
@@ -24,13 +26,28 @@ type EmailBody struct {
 	PlainText string
 }
 
+// FetchOptions controls which messages to retrieve.
+type FetchOptions struct {
+	Since       time.Time // Only return messages since this time. Zero value means no lower bound.
+	IncludeRead bool      // If true, include already-read messages. Default false (unread only).
+}
+
+// SearchOptions extends FetchOptions with a query string.
+type SearchOptions struct {
+	FetchOptions
+	Query string // Free-text search query (searched in subject, body, and from).
+}
+
 // MailProvider abstracts email access. Implementations exist for IMAP and (future) Gmail API.
 type MailProvider interface {
 	// Connect authenticates and establishes a session.
 	Connect() error
 
-	// GetUnreadMessages returns envelopes for all UNSEEN messages in the inbox.
-	GetUnreadMessages() ([]EmailEnvelope, error)
+	// FetchMail returns envelopes matching the given options.
+	FetchMail(opts FetchOptions) ([]EmailEnvelope, error)
+
+	// SearchMail returns envelopes matching a search query and options.
+	SearchMail(opts SearchOptions) ([]EmailEnvelope, error)
 
 	// FetchMessage retrieves the full body of a single message by its Message-ID.
 	FetchMessage(messageID string) (*EmailBody, error)

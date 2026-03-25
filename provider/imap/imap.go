@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"strings"
 
 	"github.com/emersion/go-imap/v2"
@@ -55,14 +56,37 @@ func (p *IMAPProvider) Connect() error {
 	return nil
 }
 
-func (p *IMAPProvider) GetUnreadMessages() ([]provider.EmailEnvelope, error) {
-	criteria := &imap.SearchCriteria{
-		NotFlag: []imap.Flag{imap.FlagSeen},
+func (p *IMAPProvider) FetchMail(opts provider.FetchOptions) ([]provider.EmailEnvelope, error) {
+	criteria := p.buildCriteria(opts)
+	return p.searchAndFetch(criteria)
+}
+
+func (p *IMAPProvider) SearchMail(opts provider.SearchOptions) ([]provider.EmailEnvelope, error) {
+	criteria := p.buildCriteria(opts.FetchOptions)
+	if opts.Query != "" {
+		criteria.Text = []string{opts.Query}
+	}
+	return p.searchAndFetch(criteria)
+}
+
+func (p *IMAPProvider) buildCriteria(opts provider.FetchOptions) *imap.SearchCriteria {
+	criteria := &imap.SearchCriteria{}
+
+	if !opts.IncludeRead {
+		criteria.NotFlag = []imap.Flag{imap.FlagSeen}
 	}
 
+	if !opts.Since.IsZero() {
+		criteria.Since = opts.Since
+	}
+
+	return criteria
+}
+
+func (p *IMAPProvider) searchAndFetch(criteria *imap.SearchCriteria) ([]provider.EmailEnvelope, error) {
 	searchData, err := p.client.UIDSearch(criteria, nil).Wait()
 	if err != nil {
-		return nil, fmt.Errorf("failed to search for unseen messages: %w", err)
+		return nil, fmt.Errorf("failed to search messages: %w", err)
 	}
 
 	uids := searchData.AllUIDs()
@@ -70,10 +94,22 @@ func (p *IMAPProvider) GetUnreadMessages() ([]provider.EmailEnvelope, error) {
 		return nil, nil
 	}
 
+	return p.fetchEnvelopes(uids)
+}
+
+// bulkHeaders is fetched alongside the envelope to detect bulk/list mail.
+var bulkHeaderSection = &imap.FetchItemBodySection{
+	Specifier:    imap.PartSpecifierHeader,
+	HeaderFields: []string{"List-Unsubscribe", "List-Id", "Precedence"},
+	Peek:         true,
+}
+
+func (p *IMAPProvider) fetchEnvelopes(uids []imap.UID) ([]provider.EmailEnvelope, error) {
 	fetchOpts := &imap.FetchOptions{
 		Envelope:      true,
 		BodyStructure: &imap.FetchItemBodyStructure{Extended: true},
 		UID:           true,
+		BodySection:   []*imap.FetchItemBodySection{bulkHeaderSection},
 	}
 
 	uidSet := imap.UIDSetNum(uids...)
@@ -99,7 +135,6 @@ func (p *IMAPProvider) GetUnreadMessages() ([]provider.EmailEnvelope, error) {
 			replyTo = env.ReplyTo[0].Addr()
 		}
 
-		// Extract attachment metadata from body structure
 		var attachments []provider.Attachment
 		if msg.BodyStructure != nil {
 			msg.BodyStructure.Walk(func(path []int, part imap.BodyStructure) bool {
@@ -117,18 +152,75 @@ func (p *IMAPProvider) GetUnreadMessages() ([]provider.EmailEnvelope, error) {
 			})
 		}
 
+		// Parse extra headers for bulk/list indicators
+		var listUnsubscribe string
+		var isBulk bool
+
+		if headerBytes := msg.FindBodySection(bulkHeaderSection); headerBytes != nil {
+			headers := parseSimpleHeaders(headerBytes)
+
+			if unsub, ok := headers["list-unsubscribe"]; ok {
+				listUnsubscribe = extractUnsubscribeURL(unsub)
+			}
+
+			if _, ok := headers["list-id"]; ok {
+				isBulk = true
+			}
+
+			if prec, ok := headers["precedence"]; ok {
+				prec = strings.ToLower(strings.TrimSpace(prec))
+				if prec == "bulk" || prec == "list" || prec == "junk" {
+					isBulk = true
+				}
+			}
+
+			// List-Unsubscribe presence also indicates bulk
+			if listUnsubscribe != "" {
+				isBulk = true
+			}
+		}
+
 		envelopes = append(envelopes, provider.EmailEnvelope{
-			MessageID:   strings.Trim(env.MessageID, "<>"),
-			From:        from,
-			Subject:     env.Subject,
-			Date:        env.Date,
-			UID:         uint32(msg.UID),
-			ReplyTo:     replyTo,
-			Attachments: attachments,
+			MessageID:       strings.Trim(env.MessageID, "<>"),
+			From:            from,
+			Subject:         env.Subject,
+			Date:            env.Date,
+			UID:             uint32(msg.UID),
+			ReplyTo:         replyTo,
+			Attachments:     attachments,
+			ListUnsubscribe: listUnsubscribe,
+			IsBulk:          isBulk,
 		})
 	}
 
 	return envelopes, nil
+}
+
+// parseSimpleHeaders parses raw RFC 822 header bytes into a lowercase key -> value map.
+func parseSimpleHeaders(data []byte) map[string]string {
+	headers := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if idx := strings.Index(line, ":"); idx > 0 {
+			key := strings.ToLower(strings.TrimSpace(line[:idx]))
+			value := strings.TrimSpace(line[idx+1:])
+			headers[key] = value
+		}
+	}
+	return headers
+}
+
+// extractUnsubscribeURL extracts the first valid HTTP(S) URL from a List-Unsubscribe header.
+// The header value typically looks like: <mailto:unsub@list.com>, <https://example.com/unsub>
+func extractUnsubscribeURL(value string) string {
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		part = strings.Trim(part, "<>")
+		if u, err := url.Parse(part); err == nil && (u.Scheme == "https" || u.Scheme == "http") {
+			return part
+		}
+	}
+	return ""
 }
 
 func (p *IMAPProvider) FetchMessage(messageID string) (*provider.EmailBody, error) {
@@ -157,19 +249,16 @@ func (p *IMAPProvider) FetchMessage(messageID string) (*provider.EmailBody, erro
 		return nil, fmt.Errorf("empty message body")
 	}
 
-	// Parse MIME message
 	mr, err := gomessage.CreateReader(bytes.NewReader(rawBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse message: %w", err)
 	}
 
-	// Extract From from actual message headers
 	from := ""
 	if addrs, err := mr.Header.AddressList("From"); err == nil && len(addrs) > 0 {
 		from = addrs[0].Address
 	}
 
-	// Extract plain text body
 	plainText, err := extractPlainText(mr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract text: %w", err)
@@ -222,24 +311,46 @@ func (p *IMAPProvider) FetchAttachment(messageID string, filename string) ([]byt
 			return nil, "", fmt.Errorf("failed to read part: %w", err)
 		}
 
-		// Check if this part is an attachment with the matching filename
-		if ah, ok := part.Header.(*gomessage.AttachmentHeader); ok {
-			partFilename, _ := ah.Filename()
-			if partFilename == filename {
-				content, err := io.ReadAll(part.Body)
-				if err != nil {
-					return nil, "", fmt.Errorf("failed to read attachment: %w", err)
-				}
-				ct := part.Header.Get("Content-Type")
-				if ct == "" {
-					ct = "application/octet-stream"
-				}
-				return content, ct, nil
+		partFilename := partName(part)
+		if partFilename == filename {
+			content, err := io.ReadAll(part.Body)
+			if err != nil {
+				return nil, "", fmt.Errorf("failed to read attachment: %w", err)
 			}
+			ct := part.Header.Get("Content-Type")
+			if ct == "" {
+				ct = "application/octet-stream"
+			}
+			return content, ct, nil
 		}
 	}
 
 	return nil, "", fmt.Errorf("attachment %q not found", filename)
+}
+
+// partName extracts the filename from a MIME part, checking both attachment
+// and inline headers, and falling back to Content-Type name parameter.
+func partName(part *gomessage.Part) string {
+	switch h := part.Header.(type) {
+	case *gomessage.AttachmentHeader:
+		if name, _ := h.Filename(); name != "" {
+			return name
+		}
+	case *gomessage.InlineHeader:
+		// Check Content-Disposition params first
+		if _, params, err := h.ContentDisposition(); err == nil {
+			if name := params["filename"]; name != "" {
+				return name
+			}
+		}
+		// Fall back to Content-Type name parameter
+		if _, params, err := h.ContentType(); err == nil {
+			if name := params["name"]; name != "" {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 func (p *IMAPProvider) Close() error {
@@ -249,7 +360,6 @@ func (p *IMAPProvider) Close() error {
 	return nil
 }
 
-// fetchByMessageID searches for a message by Message-ID header and returns its envelope data.
 func (p *IMAPProvider) fetchByMessageID(messageID string) (*imapclient.FetchMessageBuffer, error) {
 	criteria := &imap.SearchCriteria{
 		Header: []imap.SearchCriteriaHeaderField{
@@ -284,7 +394,6 @@ func (p *IMAPProvider) fetchByMessageID(messageID string) (*imapclient.FetchMess
 	return messages[0], nil
 }
 
-// extractPlainText walks MIME parts to find text/plain, falling back to stripped text/html.
 func extractPlainText(mr *gomessage.Reader) (string, error) {
 	var plainText string
 	var htmlText string
@@ -320,7 +429,6 @@ func extractPlainText(mr *gomessage.Reader) (string, error) {
 	return "", nil
 }
 
-// stripHTML extracts text content from HTML using the tokenizer.
 func stripHTML(htmlContent string) string {
 	tokenizer := html.NewTokenizer(strings.NewReader(htmlContent))
 	var result strings.Builder
@@ -357,4 +465,3 @@ func stripHTML(htmlContent string) string {
 		}
 	}
 }
-

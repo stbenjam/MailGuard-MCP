@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -34,10 +36,39 @@ func NewHandler(p provider.MailProvider, ts *truststore.TrustStore, attachmentDi
 
 func (h *Handler) Register(s *server.MCPServer) {
 	s.AddTool(
-		mcp.NewTool("get_unread_emails",
-			mcp.WithDescription("Fetches unread emails from the inbox. Trusted senders show full details; untrusted senders show only a sanitized address."),
+		mcp.NewTool("fetch_mail",
+			mcp.WithDescription("Fetches emails from the inbox. Trusted senders show full details; untrusted senders show only a sanitized address."),
+			mcp.WithString("since",
+				mcp.Description("How far back to fetch mail. Examples: \"1h\", \"24h\", \"7d\", \"30d\". Default: \"24h\"."),
+			),
+			mcp.WithBoolean("read",
+				mcp.Description("Include already-read emails. Default: false (unread only)."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum number of emails to return. Default: 50."),
+			),
 		),
-		h.getUnreadEmails,
+		h.fetchMail,
+	)
+
+	s.AddTool(
+		mcp.NewTool("search_mail",
+			mcp.WithDescription("Searches emails by query. Trusted senders show full details; untrusted senders show only a sanitized address."),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("Search terms to match against subject, body, and sender."),
+			),
+			mcp.WithString("since",
+				mcp.Description("How far back to search. Examples: \"1h\", \"24h\", \"7d\", \"30d\". Default: \"7d\"."),
+			),
+			mcp.WithBoolean("read",
+				mcp.Description("Include already-read emails. Default: true."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum number of emails to return. Default: 50."),
+			),
+		),
+		h.searchMail,
 	)
 
 	s.AddTool(
@@ -89,17 +120,93 @@ func (h *Handler) Register(s *server.MCPServer) {
 	)
 }
 
-func (h *Handler) getUnreadEmails(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	envelopes, err := h.provider.GetUnreadMessages()
+func (h *Handler) fetchMail(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	since, err := parseSince(request.GetString("since", "24h"))
 	if err != nil {
-		slog.Error("get_unread_emails failed", "error", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid 'since' value: %v", err)), nil
+	}
+
+	includeRead := request.GetBool("read", false)
+
+	opts := provider.FetchOptions{
+		Since:       time.Now().Add(-since),
+		IncludeRead: includeRead,
+	}
+
+	limit := request.GetInt("limit", 50)
+
+	envelopes, err := h.provider.FetchMail(opts)
+	if err != nil {
+		slog.Error("fetch_mail failed", "error", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch emails: %v", err)), nil
 	}
 
 	if len(envelopes) == 0 {
-		return mcp.NewToolResultText("No unread emails."), nil
+		return mcp.NewToolResultText("No emails found."), nil
 	}
 
+	truncated := false
+	if limit > 0 && len(envelopes) > limit {
+		envelopes = envelopes[:limit]
+		truncated = true
+	}
+
+	result := h.formatEnvelopes(envelopes)
+	if truncated {
+		result += fmt.Sprintf("\n\n[Results limited to %d messages. Use a narrower 'since' or add 'limit' to see more.]", limit)
+	}
+
+	return mcp.NewToolResultText(result), nil
+}
+
+func (h *Handler) searchMail(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query, err := request.RequireString("query")
+	if err != nil {
+		return mcp.NewToolResultError("query is required"), nil
+	}
+
+	since, err := parseSince(request.GetString("since", "7d"))
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid 'since' value: %v", err)), nil
+	}
+
+	includeRead := request.GetBool("read", true)
+
+	opts := provider.SearchOptions{
+		FetchOptions: provider.FetchOptions{
+			Since:       time.Now().Add(-since),
+			IncludeRead: includeRead,
+		},
+		Query: query,
+	}
+
+	limit := request.GetInt("limit", 50)
+
+	envelopes, err := h.provider.SearchMail(opts)
+	if err != nil {
+		slog.Error("search_mail failed", "error", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to search emails: %v", err)), nil
+	}
+
+	if len(envelopes) == 0 {
+		return mcp.NewToolResultText("No emails found matching the search."), nil
+	}
+
+	truncated := false
+	if limit > 0 && len(envelopes) > limit {
+		envelopes = envelopes[:limit]
+		truncated = true
+	}
+
+	result := h.formatEnvelopes(envelopes)
+	if truncated {
+		result += fmt.Sprintf("\n\n[Results limited to %d messages. Use a narrower 'since' or add 'limit' to see more.]", limit)
+	}
+
+	return mcp.NewToolResultText(result), nil
+}
+
+func (h *Handler) formatEnvelopes(envelopes []provider.EmailEnvelope) string {
 	var lines []string
 	for _, env := range envelopes {
 		addr, err := security.SanitizeAddress(env.From)
@@ -122,7 +229,14 @@ func (h *Handler) getUnreadEmails(ctx context.Context, request mcp.CallToolReque
 				env.MessageID,
 			)
 
-			// Attachment metadata
+			if env.IsBulk {
+				line += " | [Bulk/List mail]"
+			}
+
+			if env.ListUnsubscribe != "" {
+				line += fmt.Sprintf(" | Unsubscribe: %s", env.ListUnsubscribe)
+			}
+
 			if len(env.Attachments) > 0 {
 				var attachInfo []string
 				for _, att := range env.Attachments {
@@ -135,7 +249,6 @@ func (h *Handler) getUnreadEmails(ctx context.Context, request mcp.CallToolReque
 				line += " | Attachments: " + strings.Join(attachInfo, ", ")
 			}
 
-			// Reply-To warning
 			if env.ReplyTo != "" {
 				replyAddr, err := security.SanitizeAddress(env.ReplyTo)
 				if err == nil && replyAddr != addr {
@@ -149,7 +262,7 @@ func (h *Handler) getUnreadEmails(ctx context.Context, request mcp.CallToolReque
 		}
 	}
 
-	return mcp.NewToolResultText(strings.Join(lines, "\n")), nil
+	return strings.Join(lines, "\n")
 }
 
 func (h *Handler) trustSender(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -204,7 +317,6 @@ func (h *Handler) fetchMessage(ctx context.Context, request mcp.CallToolRequest)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch message: %v", err)), nil
 	}
 
-	// Re-verify sender trust from actual message
 	addr, err := security.SanitizeAddress(body.From)
 	if err != nil {
 		slog.Info("fetch_message", "message_id", messageID, "sender", body.From, "result", "denied_invalid_address")
@@ -226,7 +338,6 @@ func (h *Handler) fetchMessage(ctx context.Context, request mcp.CallToolRequest)
 
 	text := security.SanitizeContent(body.PlainText)
 
-	// Apply body size cap
 	if h.maxBodySize > 0 && len(text) > h.maxBodySize {
 		text = text[:h.maxBodySize] + "\n\n[Message truncated at " + fmt.Sprintf("%d", h.maxBodySize) + " bytes]"
 	}
@@ -245,7 +356,6 @@ func (h *Handler) fetchAttachment(ctx context.Context, request mcp.CallToolReque
 		return mcp.NewToolResultError("filename is required"), nil
 	}
 
-	// First verify the sender is trusted by fetching the message
 	body, err := h.provider.FetchMessage(messageID)
 	if err != nil {
 		slog.Error("fetch_attachment failed", "message_id", messageID, "error", err)
@@ -264,15 +374,12 @@ func (h *Handler) fetchAttachment(ctx context.Context, request mcp.CallToolReque
 		return mcp.NewToolResultError("Permission Denied: Cannot fetch attachments from untrusted sender."), nil
 	}
 
-	// Fetch the attachment
 	content, contentType, err := h.provider.FetchAttachment(messageID, filename)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch attachment: %v", err)), nil
 	}
 
-	// Save to disk
 	safeFilename := security.SanitizeFilename(filename)
-	// Use a sanitized message ID for the directory name
 	safeMsgID := strings.Map(func(r rune) rune {
 		if r == '/' || r == '\\' || r == ':' || r == '*' || r == '?' || r == '"' || r == '<' || r == '>' || r == '|' {
 			return '_'
@@ -293,6 +400,27 @@ func (h *Handler) fetchAttachment(ctx context.Context, request mcp.CallToolReque
 	slog.Info("fetch_attachment", "message_id", messageID, "sender", addr, "filename", safeFilename, "content_type", contentType, "size", len(content), "path", path, "result", "saved")
 
 	return mcp.NewToolResultText(fmt.Sprintf("Attachment saved to: %s", path)), nil
+}
+
+// parseSince parses a duration string supporting "d" suffix for days in addition
+// to standard Go duration suffixes (h, m, s).
+func parseSince(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 24 * time.Hour, nil
+	}
+
+	// Handle "d" suffix for days
+	if strings.HasSuffix(s, "d") {
+		numStr := strings.TrimSuffix(s, "d")
+		days, err := strconv.Atoi(numStr)
+		if err != nil {
+			return 0, fmt.Errorf("invalid days value: %q", s)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+
+	return time.ParseDuration(s)
 }
 
 func formatSize(bytes int64) string {

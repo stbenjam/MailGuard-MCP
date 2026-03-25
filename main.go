@@ -8,8 +8,8 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/stbenjam/mailguard-mcp/config"
-	imapprovider "github.com/stbenjam/mailguard-mcp/provider/imap"
 	"github.com/stbenjam/mailguard-mcp/provider"
+	imapprovider "github.com/stbenjam/mailguard-mcp/provider/imap"
 	"github.com/stbenjam/mailguard-mcp/tools"
 	"github.com/stbenjam/mailguard-mcp/truststore"
 )
