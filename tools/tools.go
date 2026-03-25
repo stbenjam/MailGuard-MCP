@@ -118,6 +118,23 @@ func (h *Handler) Register(s *server.MCPServer) {
 		),
 		h.fetchAttachment,
 	)
+
+	s.AddTool(
+		mcp.NewTool("update_message",
+			mcp.WithDescription("Updates flags on an email. Can mark as read/unread or flag/unflag. Only works for trusted senders."),
+			mcp.WithString("message_id",
+				mcp.Required(),
+				mcp.Description("The message ID of the email to update."),
+			),
+			mcp.WithBoolean("read",
+				mcp.Description("Set to true to mark as read, false to mark as unread."),
+			),
+			mcp.WithBoolean("flagged",
+				mcp.Description("Set to true to flag/star, false to unflag."),
+			),
+		),
+		h.updateMessage,
+	)
 }
 
 func (h *Handler) fetchMail(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -400,6 +417,75 @@ func (h *Handler) fetchAttachment(ctx context.Context, request mcp.CallToolReque
 	slog.Info("fetch_attachment", "message_id", messageID, "sender", addr, "filename", safeFilename, "content_type", contentType, "size", len(content), "path", path, "result", "saved")
 
 	return mcp.NewToolResultText(fmt.Sprintf("Attachment saved to: %s", path)), nil
+}
+
+func (h *Handler) updateMessage(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	messageID, err := request.RequireString("message_id")
+	if err != nil {
+		return mcp.NewToolResultError("message_id is required"), nil
+	}
+
+	// Verify the sender is trusted
+	body, err := h.provider.FetchMessage(messageID)
+	if err != nil {
+		slog.Error("update_message failed", "message_id", messageID, "error", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch message: %v", err)), nil
+	}
+
+	addr, err := security.SanitizeAddress(body.From)
+	if err != nil {
+		slog.Info("update_message", "message_id", messageID, "result", "denied_invalid_address")
+		return mcp.NewToolResultError("Permission Denied: Cannot update messages from untrusted sender."), nil
+	}
+
+	trusted, err := h.trustStore.IsTrusted(addr)
+	if err != nil || !trusted {
+		slog.Info("update_message", "message_id", messageID, "sender", addr, "result", "denied")
+		return mcp.NewToolResultError("Permission Denied: Cannot update messages from untrusted sender."), nil
+	}
+
+	// Parse optional boolean flags
+	args := request.GetArguments()
+	var read, flagged *bool
+
+	if v, ok := args["read"]; ok {
+		if b, ok := v.(bool); ok {
+			read = &b
+		}
+	}
+	if v, ok := args["flagged"]; ok {
+		if b, ok := v.(bool); ok {
+			flagged = &b
+		}
+	}
+
+	if read == nil && flagged == nil {
+		return mcp.NewToolResultError("Provide at least one of 'read' or 'flagged' to update."), nil
+	}
+
+	if err := h.provider.UpdateMessage(messageID, read, flagged); err != nil {
+		slog.Error("update_message failed", "message_id", messageID, "error", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to update message: %v", err)), nil
+	}
+
+	var updates []string
+	if read != nil {
+		if *read {
+			updates = append(updates, "marked as read")
+		} else {
+			updates = append(updates, "marked as unread")
+		}
+	}
+	if flagged != nil {
+		if *flagged {
+			updates = append(updates, "flagged")
+		} else {
+			updates = append(updates, "unflagged")
+		}
+	}
+
+	slog.Info("update_message", "message_id", messageID, "sender", addr, "updates", strings.Join(updates, ", "), "result", "updated")
+	return mcp.NewToolResultText(fmt.Sprintf("Message %s: %s.", messageID, strings.Join(updates, ", "))), nil
 }
 
 // parseSince parses a duration string supporting "d" suffix for days in addition

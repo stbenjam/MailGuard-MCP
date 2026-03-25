@@ -19,6 +19,7 @@ type mockProvider struct {
 	attachments    map[string]map[string][]byte
 	lastFetchOpts  *provider.FetchOptions
 	lastSearchOpts *provider.SearchOptions
+	updatedFlags   map[string]map[string]*bool // messageID -> flag name -> value
 }
 
 func (m *mockProvider) Connect() error { return nil }
@@ -39,6 +40,17 @@ func (m *mockProvider) FetchMessage(messageID string) (*provider.EmailBody, erro
 		return body, nil
 	}
 	return nil, fmt.Errorf("message not found")
+}
+
+func (m *mockProvider) UpdateMessage(messageID string, read *bool, flagged *bool) error {
+	if _, ok := m.bodies[messageID]; !ok {
+		return fmt.Errorf("message not found")
+	}
+	if m.updatedFlags == nil {
+		m.updatedFlags = make(map[string]map[string]*bool)
+	}
+	m.updatedFlags[messageID] = map[string]*bool{"read": read, "flagged": flagged}
+	return nil
 }
 
 func (m *mockProvider) FetchAttachment(messageID string, filename string) ([]byte, string, error) {
@@ -80,6 +92,8 @@ func callTool(h *Handler, name string, args map[string]any) (*mcp.CallToolResult
 		return h.fetchMessage(ctx, req)
 	case "fetch_attachment":
 		return h.fetchAttachment(ctx, req)
+	case "update_message":
+		return h.updateMessage(ctx, req)
 	}
 	return nil, fmt.Errorf("unknown tool: %s", name)
 }
@@ -556,5 +570,93 @@ func TestFetchAttachment_Untrusted(t *testing.T) {
 	}
 	if !strings.Contains(resultText(result), "Permission Denied") {
 		t.Error("expected permission denied")
+	}
+}
+
+// --- update_message tests ---
+
+func TestUpdateMessage_MarkAsRead(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {MessageID: "msg1", From: "trusted@example.com", PlainText: "Hello"},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("trusted@example.com")
+
+	result, _ := callTool(h, "update_message", map[string]any{"message_id": "msg1", "read": true})
+	text := resultText(result)
+
+	if result.IsError {
+		t.Errorf("expected success, got error: %s", text)
+	}
+	if !strings.Contains(text, "marked as read") {
+		t.Error("expected 'marked as read' in response")
+	}
+
+	flags := mp.updatedFlags["msg1"]
+	if flags["read"] == nil || !*flags["read"] {
+		t.Error("expected read flag to be set to true")
+	}
+}
+
+func TestUpdateMessage_FlagAndUnread(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {MessageID: "msg1", From: "trusted@example.com", PlainText: "Hello"},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("trusted@example.com")
+
+	result, _ := callTool(h, "update_message", map[string]any{"message_id": "msg1", "read": false, "flagged": true})
+	text := resultText(result)
+
+	if !strings.Contains(text, "marked as unread") {
+		t.Error("expected 'marked as unread'")
+	}
+	if !strings.Contains(text, "flagged") {
+		t.Error("expected 'flagged'")
+	}
+}
+
+func TestUpdateMessage_Untrusted(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {MessageID: "msg1", From: "untrusted@evil.com", PlainText: "Hello"},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+
+	result, _ := callTool(h, "update_message", map[string]any{"message_id": "msg1", "read": true})
+
+	if !result.IsError {
+		t.Error("expected error for untrusted sender")
+	}
+	if !strings.Contains(resultText(result), "Permission Denied") {
+		t.Error("expected permission denied")
+	}
+}
+
+func TestUpdateMessage_NoFlags(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {MessageID: "msg1", From: "trusted@example.com", PlainText: "Hello"},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("trusted@example.com")
+
+	result, _ := callTool(h, "update_message", map[string]any{"message_id": "msg1"})
+
+	if !result.IsError {
+		t.Error("expected error when no flags provided")
+	}
+	if !strings.Contains(resultText(result), "Provide at least one") {
+		t.Error("expected hint about providing flags")
 	}
 }

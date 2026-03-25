@@ -56,6 +56,9 @@ type MailProvider interface {
 	// Returns the raw content, content type, and any error.
 	FetchAttachment(messageID string, filename string) ([]byte, string, error)
 
+	// UpdateMessage sets flags on a message. Nil values mean no change.
+	UpdateMessage(messageID string, read *bool, flagged *bool) error
+
 	// Close tears down the connection.
 	Close() error
 }

@@ -353,6 +353,47 @@ func partName(part *gomessage.Part) string {
 	return ""
 }
 
+func (p *IMAPProvider) UpdateMessage(messageID string, read *bool, flagged *bool) error {
+	msg, err := p.fetchByMessageID(messageID)
+	if err != nil {
+		return err
+	}
+
+	uidSet := imap.UIDSetNum(imap.UID(msg.UID))
+
+	if read != nil {
+		var op imap.StoreFlagsOp
+		if *read {
+			op = imap.StoreFlagsAdd
+		} else {
+			op = imap.StoreFlagsDel
+		}
+		if err := p.client.Store(uidSet, &imap.StoreFlags{
+			Op:    op,
+			Flags: []imap.Flag{imap.FlagSeen},
+		}, nil).Close(); err != nil {
+			return fmt.Errorf("failed to update read flag: %w", err)
+		}
+	}
+
+	if flagged != nil {
+		var op imap.StoreFlagsOp
+		if *flagged {
+			op = imap.StoreFlagsAdd
+		} else {
+			op = imap.StoreFlagsDel
+		}
+		if err := p.client.Store(uidSet, &imap.StoreFlags{
+			Op:    op,
+			Flags: []imap.Flag{imap.FlagFlagged},
+		}, nil).Close(); err != nil {
+			return fmt.Errorf("failed to update flagged flag: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func (p *IMAPProvider) Close() error {
 	if p.client != nil {
 		return p.client.Close()
