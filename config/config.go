@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -18,9 +17,6 @@ type Config struct {
 	IMAPTLS          bool
 	IMAPMailbox      string
 	TrustStoreDBPath string
-	AttachmentDir    string
-	MaxBodySize      int
-	TrustedSenders   []string
 }
 
 func LoadConfig() (*Config, error) {
@@ -35,17 +31,6 @@ func LoadConfig() (*Config, error) {
 		IMAPTLS:          getEnvBool("IMAP_TLS", true),
 		IMAPMailbox:      getEnv("IMAP_MAILBOX", "INBOX"),
 		TrustStoreDBPath: getEnv("TRUSTSTORE_DB_PATH", "./truststore.db"),
-		AttachmentDir:    getEnv("ATTACHMENT_DIR", "./attachments"),
-		MaxBodySize:      getEnvInt("MAX_BODY_SIZE", 32768),
-	}
-
-	if seeds := os.Getenv("TRUSTED_SENDERS"); seeds != "" {
-		for _, s := range strings.Split(seeds, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				cfg.TrustedSenders = append(cfg.TrustedSenders, strings.ToLower(s))
-			}
-		}
 	}
 
 	if err := cfg.validate(); err != nil {

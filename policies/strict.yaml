@@ -1,0 +1,16 @@
+trust:
+  enabled: true
+  senders: []
+
+tools:
+  read_only: true
+
+content:
+  max_body_size: 16384
+  strip_quoted_replies: true
+  strip_signatures: true
+  strip_html: true
+  sanitize_prompt_injection: true
+
+attachments:
+  dir: ./attachments

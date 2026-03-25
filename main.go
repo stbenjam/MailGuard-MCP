@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/stbenjam/mailguard-mcp/config"
+	"github.com/stbenjam/mailguard-mcp/policy"
 	"github.com/stbenjam/mailguard-mcp/provider"
 	imapprovider "github.com/stbenjam/mailguard-mcp/provider/imap"
 	"github.com/stbenjam/mailguard-mcp/tools"
@@ -16,31 +17,41 @@ import (
 )
 
 func main() {
-	var (
-		readOnly bool
-		trusted  bool
-	)
+	var policyPath string
 
 	cmd := &cobra.Command{
 		Use:   "mailguard-mcp",
 		Short: "MCP server for secure LLM email access",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(readOnly, trusted)
+			return run(policyPath)
 		},
 		SilenceUsage: true,
 	}
 
-	cmd.Flags().BoolVar(&readOnly, "read-only", false, "Only register read-only tools (no trust changes or message updates)")
-	cmd.Flags().BoolVar(&trusted, "trusted", true, "Enforce trusted sender boundary (set to false to show all mail, useful for sandboxed agents)")
+	cmd.Flags().StringVar(&policyPath, "policy", "", "Path to policy YAML file (uses built-in defaults if not set)")
 
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
 
-func run(readOnly, trusted bool) error {
+func run(policyPath string) error {
 	// Configure structured logging to stderr
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	// Load policy
+	var pol *policy.Policy
+	if policyPath != "" {
+		var err error
+		pol, err = policy.Load(policyPath)
+		if err != nil {
+			return fmt.Errorf("failed to load policy: %w", err)
+		}
+		slog.Info("loaded policy", "path", policyPath)
+	} else {
+		pol = policy.Default()
+		slog.Info("using default policy")
+	}
 
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -53,8 +64,8 @@ func run(readOnly, trusted bool) error {
 	}
 	defer ts.Close()
 
-	// Seed trusted senders from config
-	for _, addr := range cfg.TrustedSenders {
+	// Seed trusted senders from policy
+	for _, addr := range pol.Trust.Senders {
 		if err := ts.Add(addr); err != nil {
 			slog.Warn("failed to seed trusted sender", "email", addr, "error", err)
 		} else {
@@ -83,10 +94,13 @@ func run(readOnly, trusted bool) error {
 	)
 
 	// Register tools
-	h := tools.NewHandler(mp, ts, cfg.AttachmentDir, cfg.MaxBodySize, trusted)
-	h.Register(s, readOnly)
+	h := tools.NewHandler(mp, ts, pol)
+	h.Register(s)
 
 	// Serve via stdio
-	slog.Info("starting MailGuard-MCP server", "read_only", readOnly, "trust_enabled", trusted)
+	slog.Info("starting MailGuard-MCP server",
+		"read_only", pol.Tools.ReadOnly,
+		"trust_enabled", pol.Trust.Enabled,
+	)
 	return server.ServeStdio(s)
 }

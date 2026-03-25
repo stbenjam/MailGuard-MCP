@@ -87,6 +87,28 @@ func SanitizeContent(text string) string {
 	return text
 }
 
+// StripHTMLTags removes HTML tags from text content.
+func StripHTMLTags(text string) string {
+	return regexp.MustCompile(`<[^>]*>`).ReplaceAllString(text, "")
+}
+
+// StripQuotedReplies removes quoted reply lines (lines starting with ">").
+func StripQuotedReplies(text string) string {
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), ">") {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// StripSignatures removes email signatures (content after a line containing only "-- ").
+func StripSignatures(text string) string {
+	parts := strings.SplitN(text, "\n-- \n", 2)
+	return parts[0]
+}
+
 // SanitizeFilename sanitizes an attachment filename for safe disk storage.
 func SanitizeFilename(name string) string {
 	if name == "" {

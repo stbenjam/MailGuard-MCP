@@ -9,6 +9,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/stbenjam/mailguard-mcp/policy"
 	"github.com/stbenjam/mailguard-mcp/provider"
 	"github.com/stbenjam/mailguard-mcp/truststore"
 )
@@ -64,10 +65,17 @@ func (m *mockProvider) FetchAttachment(messageID string, filename string) ([]byt
 
 func newTestHandler(t *testing.T, mp *mockProvider) *Handler {
 	t.Helper()
-	return newTestHandlerWithTrust(t, mp, true)
+	return newTestHandlerWithPolicy(t, mp, policy.Default())
 }
 
 func newTestHandlerWithTrust(t *testing.T, mp *mockProvider, trustEnabled bool) *Handler {
+	t.Helper()
+	pol := policy.Default()
+	pol.Trust.Enabled = trustEnabled
+	return newTestHandlerWithPolicy(t, mp, pol)
+}
+
+func newTestHandlerWithPolicy(t *testing.T, mp *mockProvider, pol *policy.Policy) *Handler {
 	t.Helper()
 	ts, err := truststore.New(":memory:")
 	if err != nil {
@@ -75,7 +83,8 @@ func newTestHandlerWithTrust(t *testing.T, mp *mockProvider, trustEnabled bool) 
 	}
 	t.Cleanup(func() { ts.Close() })
 
-	return NewHandler(mp, ts, t.TempDir(), 32768, trustEnabled)
+	pol.Attachments.Dir = t.TempDir()
+	return NewHandler(mp, ts, pol)
 }
 
 func callTool(h *Handler, name string, args map[string]any) (*mcp.CallToolResult, error) {
@@ -503,8 +512,9 @@ func TestFetchMessage_BodySizeCap(t *testing.T) {
 		},
 	}
 
-	h := newTestHandler(t, mp)
-	h.maxBodySize = 50
+	pol := policy.Default()
+	pol.Content.MaxBodySize = 50
+	h := newTestHandlerWithPolicy(t, mp, pol)
 	h.trustStore.Add("trusted@example.com")
 
 	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "msg1"})

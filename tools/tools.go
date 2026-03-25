@@ -13,38 +13,56 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/stbenjam/mailguard-mcp/policy"
 	"github.com/stbenjam/mailguard-mcp/provider"
 	"github.com/stbenjam/mailguard-mcp/security"
 	"github.com/stbenjam/mailguard-mcp/truststore"
 )
 
 type Handler struct {
-	provider      provider.MailProvider
-	trustStore    *truststore.TrustStore
-	attachmentDir string
-	maxBodySize   int
-	trustEnabled  bool
+	provider   provider.MailProvider
+	trustStore *truststore.TrustStore
+	policy     *policy.Policy
 }
 
-func NewHandler(p provider.MailProvider, ts *truststore.TrustStore, attachmentDir string, maxBodySize int, trustEnabled bool) *Handler {
+func NewHandler(p provider.MailProvider, ts *truststore.TrustStore, pol *policy.Policy) *Handler {
 	return &Handler{
-		provider:      p,
-		trustStore:    ts,
-		attachmentDir: attachmentDir,
-		maxBodySize:   maxBodySize,
-		trustEnabled:  trustEnabled,
+		provider:   p,
+		trustStore: ts,
+		policy:     pol,
 	}
 }
 
 // isTrusted returns true if the sender is trusted or if trust enforcement is disabled.
 func (h *Handler) isTrusted(addr string) (bool, error) {
-	if !h.trustEnabled {
+	if !h.policy.Trust.Enabled {
 		return true, nil
 	}
 	return h.trustStore.IsTrusted(addr)
 }
 
-func (h *Handler) Register(s *server.MCPServer, readOnly bool) {
+// filterContent applies the content filtering rules from the policy.
+func (h *Handler) filterContent(text string) string {
+	if h.policy.Content.SanitizePromptInjection {
+		text = security.SanitizeContent(text)
+	}
+
+	if h.policy.Content.StripHTML {
+		text = security.StripHTMLTags(text)
+	}
+
+	if h.policy.Content.StripQuotedReplies {
+		text = security.StripQuotedReplies(text)
+	}
+
+	if h.policy.Content.StripSignatures {
+		text = security.StripSignatures(text)
+	}
+
+	return text
+}
+
+func (h *Handler) Register(s *server.MCPServer) {
 	s.AddTool(
 		mcp.NewTool("fetch_mail",
 			mcp.WithDescription("Fetches emails from the inbox. Trusted senders show full details; untrusted senders show only a sanitized address."),
@@ -107,7 +125,7 @@ func (h *Handler) Register(s *server.MCPServer, readOnly bool) {
 		h.fetchAttachment,
 	)
 
-	if readOnly {
+	if h.policy.Tools.ReadOnly {
 		slog.Info("read-only mode enabled: trust_sender, untrust_sender, and update_message tools are disabled")
 		return
 	}
@@ -256,7 +274,7 @@ func (h *Handler) formatEnvelopes(envelopes []provider.EmailEnvelope) string {
 		if trusted {
 			line := fmt.Sprintf("From: %s | Subject: %s | Date: %s | MessageID: %s",
 				addr,
-				security.SanitizeContent(env.Subject),
+				h.filterContent(env.Subject),
 				env.Date.Format("2006-01-02T15:04:05Z"),
 				env.MessageID,
 			)
@@ -368,10 +386,11 @@ func (h *Handler) fetchMessage(ctx context.Context, request mcp.CallToolRequest)
 
 	slog.Info("fetch_message", "message_id", messageID, "sender", addr, "result", "trusted")
 
-	text := security.SanitizeContent(body.PlainText)
+	text := h.filterContent(body.PlainText)
 
-	if h.maxBodySize > 0 && len(text) > h.maxBodySize {
-		text = text[:h.maxBodySize] + "\n\n[Message truncated at " + fmt.Sprintf("%d", h.maxBodySize) + " bytes]"
+	maxBody := h.policy.Content.MaxBodySize
+	if maxBody > 0 && len(text) > maxBody {
+		text = text[:maxBody] + "\n\n[Message truncated at " + fmt.Sprintf("%d", maxBody) + " bytes]"
 	}
 
 	return mcp.NewToolResultText(text), nil
@@ -419,7 +438,7 @@ func (h *Handler) fetchAttachment(ctx context.Context, request mcp.CallToolReque
 		return r
 	}, messageID)
 
-	dir := filepath.Join(h.attachmentDir, safeMsgID)
+	dir := filepath.Join(h.policy.Attachments.Dir, safeMsgID)
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to create attachment directory: %v", err)), nil
 	}
