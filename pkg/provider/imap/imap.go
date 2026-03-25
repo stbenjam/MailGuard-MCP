@@ -396,6 +396,9 @@ func (p *IMAPProvider) UpdateMessage(messageID string, read *bool, flagged *bool
 
 func (p *IMAPProvider) Close() error {
 	if p.client != nil {
+		if err := p.client.Logout().Wait(); err != nil {
+			slog.Warn("IMAP logout failed", "error", err)
+		}
 		return p.client.Close()
 	}
 	return nil
