@@ -7,7 +7,7 @@ GOFLAGS :=
 all: build
 
 build:
-	$(GO) build $(GOFLAGS) -o $(BINARY) .
+	$(GO) build $(GOFLAGS) -o $(BINARY) ./cmd/mailguard-mcp
 
 test:
 	$(GO) test ./... -count=1
