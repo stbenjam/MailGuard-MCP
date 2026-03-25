@@ -8,12 +8,12 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
 
-	"github.com/stbenjam/mailguard-mcp/config"
-	"github.com/stbenjam/mailguard-mcp/policy"
-	"github.com/stbenjam/mailguard-mcp/provider"
-	imapprovider "github.com/stbenjam/mailguard-mcp/provider/imap"
-	"github.com/stbenjam/mailguard-mcp/tools"
-	"github.com/stbenjam/mailguard-mcp/truststore"
+	"github.com/stbenjam/mailguard-mcp/pkg/config"
+	"github.com/stbenjam/mailguard-mcp/pkg/policy"
+	"github.com/stbenjam/mailguard-mcp/pkg/provider"
+	imapprovider "github.com/stbenjam/mailguard-mcp/pkg/provider/imap"
+	"github.com/stbenjam/mailguard-mcp/pkg/tools"
+	"github.com/stbenjam/mailguard-mcp/pkg/truststore"
 )
 
 func main() {

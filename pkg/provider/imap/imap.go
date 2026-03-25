@@ -13,8 +13,8 @@ import (
 	gomessage "github.com/emersion/go-message/mail"
 	"golang.org/x/net/html"
 
-	"github.com/stbenjam/mailguard-mcp/config"
-	"github.com/stbenjam/mailguard-mcp/provider"
+	"github.com/stbenjam/mailguard-mcp/pkg/config"
+	"github.com/stbenjam/mailguard-mcp/pkg/provider"
 )
 
 type IMAPProvider struct {

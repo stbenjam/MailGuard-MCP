@@ -9,9 +9,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/stbenjam/mailguard-mcp/policy"
-	"github.com/stbenjam/mailguard-mcp/provider"
-	"github.com/stbenjam/mailguard-mcp/truststore"
+	"github.com/stbenjam/mailguard-mcp/pkg/policy"
+	"github.com/stbenjam/mailguard-mcp/pkg/provider"
+	"github.com/stbenjam/mailguard-mcp/pkg/truststore"
 )
 
 type mockProvider struct {

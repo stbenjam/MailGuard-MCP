@@ -13,10 +13,10 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/stbenjam/mailguard-mcp/policy"
-	"github.com/stbenjam/mailguard-mcp/provider"
-	"github.com/stbenjam/mailguard-mcp/security"
-	"github.com/stbenjam/mailguard-mcp/truststore"
+	"github.com/stbenjam/mailguard-mcp/pkg/policy"
+	"github.com/stbenjam/mailguard-mcp/pkg/provider"
+	"github.com/stbenjam/mailguard-mcp/pkg/security"
+	"github.com/stbenjam/mailguard-mcp/pkg/truststore"
 )
 
 type Handler struct {
