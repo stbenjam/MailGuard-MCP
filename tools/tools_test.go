@@ -64,13 +64,18 @@ func (m *mockProvider) FetchAttachment(messageID string, filename string) ([]byt
 
 func newTestHandler(t *testing.T, mp *mockProvider) *Handler {
 	t.Helper()
+	return newTestHandlerWithTrust(t, mp, true)
+}
+
+func newTestHandlerWithTrust(t *testing.T, mp *mockProvider, trustEnabled bool) *Handler {
+	t.Helper()
 	ts, err := truststore.New(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ts.Close() })
 
-	return NewHandler(mp, ts, t.TempDir(), 32768)
+	return NewHandler(mp, ts, t.TempDir(), 32768, trustEnabled)
 }
 
 func callTool(h *Handler, name string, args map[string]any) (*mcp.CallToolResult, error) {
@@ -638,6 +643,48 @@ func TestUpdateMessage_Untrusted(t *testing.T) {
 	}
 	if !strings.Contains(resultText(result), "Permission Denied") {
 		t.Error("expected permission denied")
+	}
+}
+
+// --- trust disabled tests ---
+
+func TestFetchMail_TrustDisabled(t *testing.T) {
+	mp := &mockProvider{
+		envelopes: []provider.EmailEnvelope{
+			{MessageID: "msg1", From: "anyone@unknown.com", Subject: "Secret Plans", Date: time.Now()},
+		},
+	}
+
+	h := newTestHandlerWithTrust(t, mp, false)
+
+	result, _ := callTool(h, "fetch_mail", nil)
+	text := resultText(result)
+
+	if !strings.Contains(text, "Subject: Secret Plans") {
+		t.Error("expected full details when trust is disabled")
+	}
+	if strings.Contains(text, "<untrusted_sender>") {
+		t.Error("should not have untrusted_sender tags when trust is disabled")
+	}
+}
+
+func TestFetchMessage_TrustDisabled(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {MessageID: "msg1", From: "anyone@unknown.com", PlainText: "Top secret content"},
+		},
+	}
+
+	h := newTestHandlerWithTrust(t, mp, false)
+
+	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "msg1"})
+	text := resultText(result)
+
+	if result.IsError {
+		t.Errorf("expected success when trust is disabled, got error: %s", text)
+	}
+	if !strings.Contains(text, "Top secret content") {
+		t.Error("expected message body when trust is disabled")
 	}
 }
 

@@ -23,18 +23,28 @@ type Handler struct {
 	trustStore    *truststore.TrustStore
 	attachmentDir string
 	maxBodySize   int
+	trustEnabled  bool
 }
 
-func NewHandler(p provider.MailProvider, ts *truststore.TrustStore, attachmentDir string, maxBodySize int) *Handler {
+func NewHandler(p provider.MailProvider, ts *truststore.TrustStore, attachmentDir string, maxBodySize int, trustEnabled bool) *Handler {
 	return &Handler{
 		provider:      p,
 		trustStore:    ts,
 		attachmentDir: attachmentDir,
 		maxBodySize:   maxBodySize,
+		trustEnabled:  trustEnabled,
 	}
 }
 
-func (h *Handler) Register(s *server.MCPServer) {
+// isTrusted returns true if the sender is trusted or if trust enforcement is disabled.
+func (h *Handler) isTrusted(addr string) (bool, error) {
+	if !h.trustEnabled {
+		return true, nil
+	}
+	return h.trustStore.IsTrusted(addr)
+}
+
+func (h *Handler) Register(s *server.MCPServer, readOnly bool) {
 	s.AddTool(
 		mcp.NewTool("fetch_mail",
 			mcp.WithDescription("Fetches emails from the inbox. Trusted senders show full details; untrusted senders show only a sanitized address."),
@@ -72,28 +82,6 @@ func (h *Handler) Register(s *server.MCPServer) {
 	)
 
 	s.AddTool(
-		mcp.NewTool("trust_sender",
-			mcp.WithDescription("Adds an email address (or @domain.com for domain trust) to the trusted sender list."),
-			mcp.WithString("email_address",
-				mcp.Required(),
-				mcp.Description("The email address or @domain to trust."),
-			),
-		),
-		h.trustSender,
-	)
-
-	s.AddTool(
-		mcp.NewTool("untrust_sender",
-			mcp.WithDescription("Removes an email address (or @domain.com) from the trusted sender list."),
-			mcp.WithString("email_address",
-				mcp.Required(),
-				mcp.Description("The email address or @domain to remove from trusted senders."),
-			),
-		),
-		h.untrustSender,
-	)
-
-	s.AddTool(
 		mcp.NewTool("fetch_message",
 			mcp.WithDescription("Fetches the full plain-text body of an email by its message ID. Only works for trusted senders."),
 			mcp.WithString("message_id",
@@ -117,6 +105,33 @@ func (h *Handler) Register(s *server.MCPServer) {
 			),
 		),
 		h.fetchAttachment,
+	)
+
+	if readOnly {
+		slog.Info("read-only mode enabled: trust_sender, untrust_sender, and update_message tools are disabled")
+		return
+	}
+
+	s.AddTool(
+		mcp.NewTool("trust_sender",
+			mcp.WithDescription("Adds an email address (or @domain.com for domain trust) to the trusted sender list."),
+			mcp.WithString("email_address",
+				mcp.Required(),
+				mcp.Description("The email address or @domain to trust."),
+			),
+		),
+		h.trustSender,
+	)
+
+	s.AddTool(
+		mcp.NewTool("untrust_sender",
+			mcp.WithDescription("Removes an email address (or @domain.com) from the trusted sender list."),
+			mcp.WithString("email_address",
+				mcp.Required(),
+				mcp.Description("The email address or @domain to remove from trusted senders."),
+			),
+		),
+		h.untrustSender,
 	)
 
 	s.AddTool(
@@ -232,7 +247,7 @@ func (h *Handler) formatEnvelopes(envelopes []provider.EmailEnvelope) string {
 			continue
 		}
 
-		trusted, err := h.trustStore.IsTrusted(addr)
+		trusted, err := h.isTrusted(addr)
 		if err != nil {
 			slog.Error("trust check failed", "email", addr, "error", err)
 			trusted = false
@@ -340,7 +355,7 @@ func (h *Handler) fetchMessage(ctx context.Context, request mcp.CallToolRequest)
 		return mcp.NewToolResultError("Permission Denied: Cannot fetch body from untrusted sender."), nil
 	}
 
-	trusted, err := h.trustStore.IsTrusted(addr)
+	trusted, err := h.isTrusted(addr)
 	if err != nil {
 		slog.Error("trust check failed", "email", addr, "error", err)
 		return mcp.NewToolResultError("Permission Denied: Cannot fetch body from untrusted sender."), nil
@@ -385,7 +400,7 @@ func (h *Handler) fetchAttachment(ctx context.Context, request mcp.CallToolReque
 		return mcp.NewToolResultError("Permission Denied: Cannot fetch attachments from untrusted sender."), nil
 	}
 
-	trusted, err := h.trustStore.IsTrusted(addr)
+	trusted, err := h.isTrusted(addr)
 	if err != nil || !trusted {
 		slog.Info("fetch_attachment", "message_id", messageID, "sender", addr, "filename", filename, "result", "denied")
 		return mcp.NewToolResultError("Permission Denied: Cannot fetch attachments from untrusted sender."), nil
@@ -438,7 +453,7 @@ func (h *Handler) updateMessage(ctx context.Context, request mcp.CallToolRequest
 		return mcp.NewToolResultError("Permission Denied: Cannot update messages from untrusted sender."), nil
 	}
 
-	trusted, err := h.trustStore.IsTrusted(addr)
+	trusted, err := h.isTrusted(addr)
 	if err != nil || !trusted {
 		slog.Info("update_message", "message_id", messageID, "sender", addr, "result", "denied")
 		return mcp.NewToolResultError("Permission Denied: Cannot update messages from untrusted sender."), nil
