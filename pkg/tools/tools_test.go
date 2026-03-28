@@ -97,7 +97,8 @@ func newTestHandlerWithPolicy(t *testing.T, mp *mockProvider, pol *policy.Policy
 	t.Cleanup(func() { ts.Close() })
 
 	pol.Attachments.Dir = t.TempDir()
-	return NewHandler(mp, ts, pol)
+	providers := map[string]provider.MailProvider{"default": mp}
+	return NewHandler(providers, ts, pol)
 }
 
 func callTool(h *Handler, name string, args map[string]any) (*mcp.CallToolResult, error) {
@@ -494,7 +495,7 @@ func TestFetchMessage_Trusted(t *testing.T) {
 	h := newTestHandler(t, mp)
 	h.trustStore.Add("trusted@example.com")
 
-	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "msg1"})
+	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "default:msg1"})
 	text := resultText(result)
 
 	if !strings.Contains(text, "Hello, this is the body.") {
@@ -511,7 +512,7 @@ func TestFetchMessage_Untrusted(t *testing.T) {
 
 	h := newTestHandler(t, mp)
 
-	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "msg1"})
+	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "default:msg1"})
 
 	if !result.IsError {
 		t.Error("expected error for untrusted sender")
@@ -534,7 +535,7 @@ func TestFetchMessage_BodySizeCap(t *testing.T) {
 	h := newTestHandlerWithPolicy(t, mp, pol)
 	h.trustStore.Add("trusted@example.com")
 
-	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "msg1"})
+	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "default:msg1"})
 	text := resultText(result)
 
 	if !strings.Contains(text, "[Message truncated") {
@@ -555,7 +556,7 @@ func TestFetchMessage_ContentSanitization(t *testing.T) {
 	h := newTestHandler(t, mp)
 	h.trustStore.Add("trusted@example.com")
 
-	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "msg1"})
+	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "default:msg1"})
 	text := resultText(result)
 
 	if strings.Contains(text, "<system>") {
@@ -578,7 +579,7 @@ func TestFetchAttachment_Trusted(t *testing.T) {
 	h := newTestHandler(t, mp)
 	h.trustStore.Add("trusted@example.com")
 
-	result, _ := callTool(h, "fetch_attachment", map[string]any{"message_id": "msg1", "filename": "report.pdf"})
+	result, _ := callTool(h, "fetch_attachment", map[string]any{"message_id": "default:msg1", "filename": "report.pdf"})
 	text := resultText(result)
 
 	if !strings.Contains(text, "Attachment saved to:") {
@@ -595,7 +596,7 @@ func TestFetchAttachment_Untrusted(t *testing.T) {
 
 	h := newTestHandler(t, mp)
 
-	result, _ := callTool(h, "fetch_attachment", map[string]any{"message_id": "msg1", "filename": "malware.exe"})
+	result, _ := callTool(h, "fetch_attachment", map[string]any{"message_id": "default:msg1", "filename": "malware.exe"})
 
 	if !result.IsError {
 		t.Error("expected error for untrusted sender")
@@ -617,7 +618,7 @@ func TestUpdateMessage_MarkAsRead(t *testing.T) {
 	h := newTestHandler(t, mp)
 	h.trustStore.Add("trusted@example.com")
 
-	result, _ := callTool(h, "update_message", map[string]any{"message_id": "msg1", "read": true})
+	result, _ := callTool(h, "update_message", map[string]any{"message_id": "default:msg1", "read": true})
 	text := resultText(result)
 
 	if result.IsError {
@@ -643,7 +644,7 @@ func TestUpdateMessage_FlagAndUnread(t *testing.T) {
 	h := newTestHandler(t, mp)
 	h.trustStore.Add("trusted@example.com")
 
-	result, _ := callTool(h, "update_message", map[string]any{"message_id": "msg1", "read": false, "flagged": true})
+	result, _ := callTool(h, "update_message", map[string]any{"message_id": "default:msg1", "read": false, "flagged": true})
 	text := resultText(result)
 
 	if !strings.Contains(text, "marked as unread") {
@@ -663,7 +664,7 @@ func TestUpdateMessage_Untrusted(t *testing.T) {
 
 	h := newTestHandler(t, mp)
 
-	result, _ := callTool(h, "update_message", map[string]any{"message_id": "msg1", "read": true})
+	result, _ := callTool(h, "update_message", map[string]any{"message_id": "default:msg1", "read": true})
 
 	if !result.IsError {
 		t.Error("expected error for untrusted sender")
@@ -704,7 +705,7 @@ func TestFetchMessage_TrustDisabled(t *testing.T) {
 
 	h := newTestHandlerWithTrust(t, mp, false)
 
-	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "msg1"})
+	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "default:msg1"})
 	text := resultText(result)
 
 	if result.IsError {
@@ -725,7 +726,7 @@ func TestUpdateMessage_NoFlags(t *testing.T) {
 	h := newTestHandler(t, mp)
 	h.trustStore.Add("trusted@example.com")
 
-	result, _ := callTool(h, "update_message", map[string]any{"message_id": "msg1"})
+	result, _ := callTool(h, "update_message", map[string]any{"message_id": "default:msg1"})
 
 	if !result.IsError {
 		t.Error("expected error when no flags provided")
@@ -803,7 +804,7 @@ func TestReplyMail(t *testing.T) {
 	h.trustStore.Add("alice@example.com")
 
 	result, _ := callTool(h, "reply_mail", map[string]any{
-		"message_id": "msg1",
+		"message_id": "default:msg1",
 		"body":       "Thanks for the update!",
 	})
 	text := resultText(result)
@@ -847,7 +848,7 @@ func TestReplyMail_NoReplyAll(t *testing.T) {
 	h.trustStore.Add("alice@example.com")
 
 	result, _ := callTool(h, "reply_mail", map[string]any{
-		"message_id": "msg1",
+		"message_id": "default:msg1",
 		"body":       "Hi!",
 		"reply_all":  false,
 	})
@@ -877,7 +878,7 @@ func TestReplyMail_Untrusted(t *testing.T) {
 	h := newTestHandler(t, mp)
 
 	result, _ := callTool(h, "reply_mail", map[string]any{
-		"message_id": "msg1",
+		"message_id": "default:msg1",
 		"body":       "Replying",
 	})
 
@@ -906,7 +907,7 @@ func TestReplyMail_UsesReplyToHeader(t *testing.T) {
 	h.trustStore.Add("alice@example.com")
 
 	callTool(h, "reply_mail", map[string]any{
-		"message_id": "msg1",
+		"message_id": "default:msg1",
 		"body":       "Hi!",
 		"reply_all":  false,
 	})
@@ -916,5 +917,150 @@ func TestReplyMail_UsesReplyToHeader(t *testing.T) {
 	}
 	if mp.lastDraft.To[0] != "replies@example.com" {
 		t.Errorf("expected reply to go to Reply-To address, got: %v", mp.lastDraft.To)
+	}
+}
+
+// --- multi-account tests ---
+
+func TestFetchMail_MultiAccount(t *testing.T) {
+	personal := &mockProvider{
+		envelopes: []provider.EmailEnvelope{
+			{MessageID: "p1", From: "friend@example.com", Subject: "Personal mail", Date: time.Date(2026, 3, 24, 10, 0, 0, 0, time.UTC)},
+		},
+	}
+	work := &mockProvider{
+		envelopes: []provider.EmailEnvelope{
+			{MessageID: "w1", From: "boss@company.com", Subject: "Work mail", Date: time.Date(2026, 3, 24, 11, 0, 0, 0, time.UTC)},
+		},
+	}
+
+	ts, err := truststore.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ts.Close() })
+	ts.Add("friend@example.com")
+	ts.Add("boss@company.com")
+
+	pol := policy.Default()
+	providers := map[string]provider.MailProvider{"personal": personal, "work": work}
+	h := NewHandler(providers, ts, pol)
+
+	// Fetch all accounts
+	result, _ := callTool(h, "fetch_mail", nil)
+	text := resultText(result)
+
+	if !strings.Contains(text, "Personal mail") {
+		t.Error("expected personal mail")
+	}
+	if !strings.Contains(text, "Work mail") {
+		t.Error("expected work mail")
+	}
+	// Message IDs should be prefixed
+	if !strings.Contains(text, "personal:p1") {
+		t.Error("expected prefixed personal message ID")
+	}
+	if !strings.Contains(text, "work:w1") {
+		t.Error("expected prefixed work message ID")
+	}
+	// Multi-account should show account labels
+	if !strings.Contains(text, "Account: personal") {
+		t.Error("expected account label for personal")
+	}
+	if !strings.Contains(text, "Account: work") {
+		t.Error("expected account label for work")
+	}
+}
+
+func TestFetchMail_MultiAccount_FilterByAccount(t *testing.T) {
+	personal := &mockProvider{
+		envelopes: []provider.EmailEnvelope{
+			{MessageID: "p1", From: "friend@example.com", Subject: "Personal", Date: time.Now()},
+		},
+	}
+	work := &mockProvider{
+		envelopes: []provider.EmailEnvelope{
+			{MessageID: "w1", From: "boss@company.com", Subject: "Work", Date: time.Now()},
+		},
+	}
+
+	ts, err := truststore.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ts.Close() })
+	ts.Add("friend@example.com")
+	ts.Add("boss@company.com")
+
+	pol := policy.Default()
+	providers := map[string]provider.MailProvider{"personal": personal, "work": work}
+	h := NewHandler(providers, ts, pol)
+
+	result, _ := callTool(h, "fetch_mail", map[string]any{"account": "work"})
+	text := resultText(result)
+
+	if strings.Contains(text, "Personal") {
+		t.Error("should not include personal mail when filtering by work account")
+	}
+	if !strings.Contains(text, "Work") {
+		t.Error("expected work mail")
+	}
+}
+
+func TestFetchMessage_MultiAccount_Routing(t *testing.T) {
+	personal := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"p1": {MessageID: "p1", From: "friend@example.com", PlainText: "Personal body"},
+		},
+	}
+	work := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"w1": {MessageID: "w1", From: "boss@company.com", PlainText: "Work body"},
+		},
+	}
+
+	ts, err := truststore.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ts.Close() })
+	ts.Add("friend@example.com")
+	ts.Add("boss@company.com")
+
+	pol := policy.Default()
+	providers := map[string]provider.MailProvider{"personal": personal, "work": work}
+	h := NewHandler(providers, ts, pol)
+
+	// Fetch from personal account
+	result, _ := callTool(h, "fetch_message", map[string]any{"message_id": "personal:p1"})
+	if result.IsError {
+		t.Errorf("expected success, got error: %s", resultText(result))
+	}
+	if !strings.Contains(resultText(result), "Personal body") {
+		t.Error("expected personal message body")
+	}
+
+	// Fetch from work account
+	result, _ = callTool(h, "fetch_message", map[string]any{"message_id": "work:w1"})
+	if result.IsError {
+		t.Errorf("expected success, got error: %s", resultText(result))
+	}
+	if !strings.Contains(resultText(result), "Work body") {
+		t.Error("expected work message body")
+	}
+}
+
+func TestParseMessageID(t *testing.T) {
+	account, msgID, err := parseMessageID("work:abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account != "work" || msgID != "abc123" {
+		t.Errorf("expected work/abc123, got %s/%s", account, msgID)
+	}
+
+	_, _, err = parseMessageID("nocolon")
+	if err == nil {
+		t.Error("expected error for missing colon")
 	}
 }

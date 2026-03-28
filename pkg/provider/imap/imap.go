@@ -20,10 +20,10 @@ import (
 
 type IMAPProvider struct {
 	client *imapclient.Client
-	config *config.Config
+	config *config.AccountConfig
 }
 
-func New(cfg *config.Config) *IMAPProvider {
+func New(cfg *config.AccountConfig) *IMAPProvider {
 	return &IMAPProvider{config: cfg}
 }
 

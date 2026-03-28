@@ -17,25 +17,29 @@ import (
 )
 
 func main() {
-	var policyPath string
+	var (
+		policyPath   string
+		accountsPath string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "mailguard-mcp",
 		Short: "MCP server for secure LLM email access",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(policyPath)
+			return run(policyPath, accountsPath)
 		},
 		SilenceUsage: true,
 	}
 
 	cmd.Flags().StringVar(&policyPath, "policy", "", "Path to policy YAML file (uses built-in defaults if not set)")
+	cmd.Flags().StringVar(&accountsPath, "accounts", "", "Path to accounts YAML file (falls back to env vars for a single account if not set)")
 
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
 
-func run(policyPath string) error {
+func run(policyPath, accountsPath string) error {
 	// Configure structured logging to stderr
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
@@ -53,6 +57,25 @@ func run(policyPath string) error {
 		slog.Info("using default policy")
 	}
 
+	// Load accounts
+	var accounts map[string]*config.AccountConfig
+	if accountsPath != "" {
+		var err error
+		accounts, err = config.LoadAccounts(accountsPath)
+		if err != nil {
+			return fmt.Errorf("failed to load accounts: %w", err)
+		}
+		slog.Info("loaded accounts", "path", accountsPath, "count", len(accounts))
+	} else {
+		var err error
+		accounts, err = config.DefaultAccountFromEnv()
+		if err != nil {
+			return fmt.Errorf("failed to load config from environment: %w", err)
+		}
+		slog.Info("using single account from environment")
+	}
+
+	// Load global config (trust store path)
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -73,19 +96,25 @@ func run(policyPath string) error {
 		}
 	}
 
-	// Create mail provider
-	var mp provider.MailProvider
-	switch cfg.MailProvider {
-	case "imap":
-		mp = imapprovider.New(cfg)
-	default:
-		return fmt.Errorf("unsupported mail provider: %s", cfg.MailProvider)
+	// Create mail providers
+	providers := make(map[string]provider.MailProvider, len(accounts))
+	for name, acct := range accounts {
+		switch acct.Provider {
+		case "imap":
+			providers[name] = imapprovider.New(acct)
+		default:
+			return fmt.Errorf("account %q: unsupported provider: %s", name, acct.Provider)
+		}
 	}
 
-	if err := mp.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to mail provider: %w", err)
+	// Connect all providers
+	for name, mp := range providers {
+		if err := mp.Connect(); err != nil {
+			return fmt.Errorf("account %q: failed to connect: %w", name, err)
+		}
+		defer mp.Close()
+		slog.Info("connected account", "name", name)
 	}
-	defer mp.Close()
 
 	// Create MCP server
 	s := server.NewMCPServer(
@@ -94,11 +123,12 @@ func run(policyPath string) error {
 	)
 
 	// Register tools
-	h := tools.NewHandler(mp, ts, pol)
+	h := tools.NewHandler(providers, ts, pol)
 	h.Register(s)
 
 	// Serve via stdio
 	slog.Info("starting MailGuard-MCP server",
+		"accounts", len(providers),
 		"read_only", pol.Tools.ReadOnly,
 		"trust_enabled", pol.Trust.Enabled,
 	)

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,16 +21,25 @@ import (
 )
 
 type Handler struct {
-	provider   provider.MailProvider
-	trustStore *truststore.TrustStore
-	policy     *policy.Policy
+	providers    map[string]provider.MailProvider
+	accountOrder []string // deterministic iteration order
+	trustStore   *truststore.TrustStore
+	policy       *policy.Policy
 }
 
-func NewHandler(p provider.MailProvider, ts *truststore.TrustStore, pol *policy.Policy) *Handler {
+func NewHandler(providers map[string]provider.MailProvider, ts *truststore.TrustStore, pol *policy.Policy) *Handler {
+	// Sort account names for deterministic ordering
+	order := make([]string, 0, len(providers))
+	for name := range providers {
+		order = append(order, name)
+	}
+	sort.Strings(order)
+
 	return &Handler{
-		provider:   p,
-		trustStore: ts,
-		policy:     pol,
+		providers:    providers,
+		accountOrder: order,
+		trustStore:   ts,
+		policy:       pol,
 	}
 }
 
@@ -62,7 +72,48 @@ func (h *Handler) filterContent(text string) string {
 	return text
 }
 
+// prefixMessageID adds the account name prefix to a message ID.
+func prefixMessageID(account, messageID string) string {
+	return account + ":" + messageID
+}
+
+// parseMessageID splits a prefixed message ID into account and raw ID.
+func parseMessageID(prefixed string) (account, messageID string, err error) {
+	idx := strings.Index(prefixed, ":")
+	if idx < 0 {
+		return "", "", fmt.Errorf("invalid message ID format (expected account:id): %q", prefixed)
+	}
+	return prefixed[:idx], prefixed[idx+1:], nil
+}
+
+// getProvider returns the provider for the given account name.
+func (h *Handler) getProvider(account string) (provider.MailProvider, error) {
+	p, ok := h.providers[account]
+	if !ok {
+		return nil, fmt.Errorf("unknown account: %q", account)
+	}
+	return p, nil
+}
+
+// getProviderByMessageID parses the prefixed message ID and returns the provider, account, and raw message ID.
+func (h *Handler) getProviderByMessageID(prefixedID string) (provider.MailProvider, string, string, error) {
+	account, messageID, err := parseMessageID(prefixedID)
+	if err != nil {
+		return nil, "", "", err
+	}
+	p, err := h.getProvider(account)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return p, account, messageID, nil
+}
+
 func (h *Handler) Register(s *server.MCPServer) {
+	accountDesc := ""
+	if len(h.providers) > 1 {
+		accountDesc = fmt.Sprintf(" Available accounts: %s.", strings.Join(h.accountOrder, ", "))
+	}
+
 	s.AddTool(
 		mcp.NewTool("fetch_mail",
 			mcp.WithDescription("Fetches emails from the inbox. Trusted senders show full details; untrusted senders show only a sanitized address."),
@@ -74,6 +125,9 @@ func (h *Handler) Register(s *server.MCPServer) {
 			),
 			mcp.WithNumber("limit",
 				mcp.Description("Maximum number of emails to return. Default: 50."),
+			),
+			mcp.WithString("account",
+				mcp.Description("Fetch from a specific account only. If omitted, fetches from all accounts."+accountDesc),
 			),
 		),
 		h.fetchMail,
@@ -94,6 +148,9 @@ func (h *Handler) Register(s *server.MCPServer) {
 			),
 			mcp.WithNumber("limit",
 				mcp.Description("Maximum number of emails to return. Default: 50."),
+			),
+			mcp.WithString("account",
+				mcp.Description("Search a specific account only. If omitted, searches all accounts."+accountDesc),
 			),
 		),
 		h.searchMail,
@@ -147,6 +204,9 @@ func (h *Handler) Register(s *server.MCPServer) {
 			mcp.WithString("body",
 				mcp.Required(),
 				mcp.Description("The plain-text email body."),
+			),
+			mcp.WithString("account",
+				mcp.Description("Account to create the draft in. Defaults to the first configured account."+accountDesc),
 			),
 		),
 		h.sendMail,
@@ -224,24 +284,41 @@ func (h *Handler) fetchMail(ctx context.Context, request mcp.CallToolRequest) (*
 	}
 
 	limit := request.GetInt("limit", 50)
+	accountFilter := request.GetString("account", "")
 
-	envelopes, err := h.provider.FetchMail(opts)
+	accounts, err := h.resolveAccounts(accountFilter)
 	if err != nil {
-		slog.Error("fetch_mail failed", "error", err)
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch emails: %v", err)), nil
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	if len(envelopes) == 0 {
+	var allEnvelopes []accountEnvelope
+	for _, name := range accounts {
+		envelopes, err := h.providers[name].FetchMail(opts)
+		if err != nil {
+			slog.Error("fetch_mail failed", "account", name, "error", err)
+			continue
+		}
+		for i := range envelopes {
+			allEnvelopes = append(allEnvelopes, accountEnvelope{account: name, envelope: envelopes[i]})
+		}
+	}
+
+	if len(allEnvelopes) == 0 {
 		return mcp.NewToolResultText("No emails found."), nil
 	}
 
+	// Sort by date descending
+	sort.Slice(allEnvelopes, func(i, j int) bool {
+		return allEnvelopes[i].envelope.Date.After(allEnvelopes[j].envelope.Date)
+	})
+
 	truncated := false
-	if limit > 0 && len(envelopes) > limit {
-		envelopes = envelopes[:limit]
+	if limit > 0 && len(allEnvelopes) > limit {
+		allEnvelopes = allEnvelopes[:limit]
 		truncated = true
 	}
 
-	result := h.formatEnvelopes(envelopes)
+	result := h.formatAccountEnvelopes(allEnvelopes)
 	if truncated {
 		result += fmt.Sprintf("\n\n[Results limited to %d messages. Use a narrower 'since' or add 'limit' to see more.]", limit)
 	}
@@ -271,24 +348,40 @@ func (h *Handler) searchMail(ctx context.Context, request mcp.CallToolRequest) (
 	}
 
 	limit := request.GetInt("limit", 50)
+	accountFilter := request.GetString("account", "")
 
-	envelopes, err := h.provider.SearchMail(opts)
+	accounts, err := h.resolveAccounts(accountFilter)
 	if err != nil {
-		slog.Error("search_mail failed", "error", err)
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to search emails: %v", err)), nil
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	if len(envelopes) == 0 {
+	var allEnvelopes []accountEnvelope
+	for _, name := range accounts {
+		envelopes, err := h.providers[name].SearchMail(opts)
+		if err != nil {
+			slog.Error("search_mail failed", "account", name, "error", err)
+			continue
+		}
+		for i := range envelopes {
+			allEnvelopes = append(allEnvelopes, accountEnvelope{account: name, envelope: envelopes[i]})
+		}
+	}
+
+	if len(allEnvelopes) == 0 {
 		return mcp.NewToolResultText("No emails found matching the search."), nil
 	}
 
+	sort.Slice(allEnvelopes, func(i, j int) bool {
+		return allEnvelopes[i].envelope.Date.After(allEnvelopes[j].envelope.Date)
+	})
+
 	truncated := false
-	if limit > 0 && len(envelopes) > limit {
-		envelopes = envelopes[:limit]
+	if limit > 0 && len(allEnvelopes) > limit {
+		allEnvelopes = allEnvelopes[:limit]
 		truncated = true
 	}
 
-	result := h.formatEnvelopes(envelopes)
+	result := h.formatAccountEnvelopes(allEnvelopes)
 	if truncated {
 		result += fmt.Sprintf("\n\n[Results limited to %d messages. Use a narrower 'since' or add 'limit' to see more.]", limit)
 	}
@@ -296,12 +389,31 @@ func (h *Handler) searchMail(ctx context.Context, request mcp.CallToolRequest) (
 	return mcp.NewToolResultText(result), nil
 }
 
-func (h *Handler) formatEnvelopes(envelopes []provider.EmailEnvelope) string {
+// accountEnvelope pairs an envelope with its source account name.
+type accountEnvelope struct {
+	account  string
+	envelope provider.EmailEnvelope
+}
+
+// resolveAccounts returns the list of account names to query.
+// If filter is empty, returns all accounts. If filter is set, validates it exists.
+func (h *Handler) resolveAccounts(filter string) ([]string, error) {
+	if filter == "" {
+		return h.accountOrder, nil
+	}
+	if _, ok := h.providers[filter]; !ok {
+		return nil, fmt.Errorf("unknown account: %q (available: %s)", filter, strings.Join(h.accountOrder, ", "))
+	}
+	return []string{filter}, nil
+}
+
+func (h *Handler) formatAccountEnvelopes(envelopes []accountEnvelope) string {
+	multiAccount := len(h.providers) > 1
 	var lines []string
-	for _, env := range envelopes {
-		addr, err := security.SanitizeAddress(env.From)
+	for _, ae := range envelopes {
+		addr, err := security.SanitizeAddress(ae.envelope.From)
 		if err != nil {
-			lines = append(lines, fmt.Sprintf("<untrusted_sender>[invalid address]</untrusted_sender> | MessageID: %s", env.MessageID))
+			lines = append(lines, fmt.Sprintf("<untrusted_sender>[invalid address]</untrusted_sender> | MessageID: %s", prefixMessageID(ae.account, ae.envelope.MessageID)))
 			continue
 		}
 
@@ -311,25 +423,31 @@ func (h *Handler) formatEnvelopes(envelopes []provider.EmailEnvelope) string {
 			trusted = false
 		}
 
+		prefixedID := prefixMessageID(ae.account, ae.envelope.MessageID)
+
 		if trusted {
 			line := fmt.Sprintf("From: %s | Subject: %s | Date: %s | MessageID: %s",
 				addr,
-				h.filterContent(env.Subject),
-				env.Date.Format("2006-01-02T15:04:05Z"),
-				env.MessageID,
+				h.filterContent(ae.envelope.Subject),
+				ae.envelope.Date.Format("2006-01-02T15:04:05Z"),
+				prefixedID,
 			)
 
-			if env.IsBulk {
+			if multiAccount {
+				line += fmt.Sprintf(" | Account: %s", ae.account)
+			}
+
+			if ae.envelope.IsBulk {
 				line += " | [Bulk/List mail]"
 			}
 
-			if env.ListUnsubscribe != "" {
-				line += fmt.Sprintf(" | Unsubscribe: %s", env.ListUnsubscribe)
+			if ae.envelope.ListUnsubscribe != "" {
+				line += fmt.Sprintf(" | Unsubscribe: %s", ae.envelope.ListUnsubscribe)
 			}
 
-			if len(env.Attachments) > 0 {
+			if len(ae.envelope.Attachments) > 0 {
 				var attachInfo []string
-				for _, att := range env.Attachments {
+				for _, att := range ae.envelope.Attachments {
 					attachInfo = append(attachInfo, fmt.Sprintf("%s (%s, %s)",
 						security.SanitizeFilename(att.Filename),
 						att.ContentType,
@@ -339,8 +457,8 @@ func (h *Handler) formatEnvelopes(envelopes []provider.EmailEnvelope) string {
 				line += " | Attachments: " + strings.Join(attachInfo, ", ")
 			}
 
-			if env.ReplyTo != "" {
-				replyAddr, err := security.SanitizeAddress(env.ReplyTo)
+			if ae.envelope.ReplyTo != "" {
+				replyAddr, err := security.SanitizeAddress(ae.envelope.ReplyTo)
 				if err == nil && replyAddr != addr {
 					line += fmt.Sprintf(" | [WARNING: Reply-To (%s) differs from From]", replyAddr)
 				}
@@ -348,7 +466,7 @@ func (h *Handler) formatEnvelopes(envelopes []provider.EmailEnvelope) string {
 
 			lines = append(lines, line)
 		} else {
-			lines = append(lines, fmt.Sprintf("<untrusted_sender>%s</untrusted_sender> | MessageID: %s", addr, env.MessageID))
+			lines = append(lines, fmt.Sprintf("<untrusted_sender>%s</untrusted_sender> | MessageID: %s", addr, prefixedID))
 		}
 	}
 
@@ -396,20 +514,25 @@ func (h *Handler) untrustSender(ctx context.Context, request mcp.CallToolRequest
 }
 
 func (h *Handler) fetchMessage(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	messageID, err := request.RequireString("message_id")
+	rawID, err := request.RequireString("message_id")
 	if err != nil {
 		return mcp.NewToolResultError("message_id is required"), nil
 	}
 
-	body, err := h.provider.FetchMessage(messageID)
+	p, _, messageID, err := h.getProviderByMessageID(rawID)
 	if err != nil {
-		slog.Error("fetch_message failed", "message_id", messageID, "error", err)
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	body, err := p.FetchMessage(messageID)
+	if err != nil {
+		slog.Error("fetch_message failed", "message_id", rawID, "error", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch message: %v", err)), nil
 	}
 
 	addr, err := security.SanitizeAddress(body.From)
 	if err != nil {
-		slog.Info("fetch_message", "message_id", messageID, "sender", body.From, "result", "denied_invalid_address")
+		slog.Info("fetch_message", "message_id", rawID, "sender", body.From, "result", "denied_invalid_address")
 		return mcp.NewToolResultError("Permission Denied: Cannot fetch body from untrusted sender."), nil
 	}
 
@@ -420,11 +543,11 @@ func (h *Handler) fetchMessage(ctx context.Context, request mcp.CallToolRequest)
 	}
 
 	if !trusted {
-		slog.Info("fetch_message", "message_id", messageID, "sender", addr, "result", "denied")
+		slog.Info("fetch_message", "message_id", rawID, "sender", addr, "result", "denied")
 		return mcp.NewToolResultError("Permission Denied: Cannot fetch body from untrusted sender."), nil
 	}
 
-	slog.Info("fetch_message", "message_id", messageID, "sender", addr, "result", "trusted")
+	slog.Info("fetch_message", "message_id", rawID, "sender", addr, "result", "trusted")
 
 	text := h.filterContent(body.PlainText)
 
@@ -437,7 +560,7 @@ func (h *Handler) fetchMessage(ctx context.Context, request mcp.CallToolRequest)
 }
 
 func (h *Handler) fetchAttachment(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	messageID, err := request.RequireString("message_id")
+	rawID, err := request.RequireString("message_id")
 	if err != nil {
 		return mcp.NewToolResultError("message_id is required"), nil
 	}
@@ -447,25 +570,30 @@ func (h *Handler) fetchAttachment(ctx context.Context, request mcp.CallToolReque
 		return mcp.NewToolResultError("filename is required"), nil
 	}
 
-	body, err := h.provider.FetchMessage(messageID)
+	p, _, messageID, err := h.getProviderByMessageID(rawID)
 	if err != nil {
-		slog.Error("fetch_attachment failed", "message_id", messageID, "error", err)
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	body, err := p.FetchMessage(messageID)
+	if err != nil {
+		slog.Error("fetch_attachment failed", "message_id", rawID, "error", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch message: %v", err)), nil
 	}
 
 	addr, err := security.SanitizeAddress(body.From)
 	if err != nil {
-		slog.Info("fetch_attachment", "message_id", messageID, "filename", filename, "result", "denied_invalid_address")
+		slog.Info("fetch_attachment", "message_id", rawID, "filename", filename, "result", "denied_invalid_address")
 		return mcp.NewToolResultError("Permission Denied: Cannot fetch attachments from untrusted sender."), nil
 	}
 
 	trusted, err := h.isTrusted(addr)
 	if err != nil || !trusted {
-		slog.Info("fetch_attachment", "message_id", messageID, "sender", addr, "filename", filename, "result", "denied")
+		slog.Info("fetch_attachment", "message_id", rawID, "sender", addr, "filename", filename, "result", "denied")
 		return mcp.NewToolResultError("Permission Denied: Cannot fetch attachments from untrusted sender."), nil
 	}
 
-	content, contentType, err := h.provider.FetchAttachment(messageID, filename)
+	content, contentType, err := p.FetchAttachment(messageID, filename)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch attachment: %v", err)), nil
 	}
@@ -476,7 +604,7 @@ func (h *Handler) fetchAttachment(ctx context.Context, request mcp.CallToolReque
 			return '_'
 		}
 		return r
-	}, messageID)
+	}, rawID)
 
 	dir := filepath.Join(h.policy.Attachments.Dir, safeMsgID)
 	if err := os.MkdirAll(dir, 0750); err != nil {
@@ -488,33 +616,38 @@ func (h *Handler) fetchAttachment(ctx context.Context, request mcp.CallToolReque
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to save attachment: %v", err)), nil
 	}
 
-	slog.Info("fetch_attachment", "message_id", messageID, "sender", addr, "filename", safeFilename, "content_type", contentType, "size", len(content), "path", path, "result", "saved")
+	slog.Info("fetch_attachment", "message_id", rawID, "sender", addr, "filename", safeFilename, "content_type", contentType, "size", len(content), "path", path, "result", "saved")
 
 	return mcp.NewToolResultText(fmt.Sprintf("Attachment saved to: %s", path)), nil
 }
 
 func (h *Handler) updateMessage(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	messageID, err := request.RequireString("message_id")
+	rawID, err := request.RequireString("message_id")
 	if err != nil {
 		return mcp.NewToolResultError("message_id is required"), nil
 	}
 
-	// Verify the sender is trusted
-	body, err := h.provider.FetchMessage(messageID)
+	p, _, messageID, err := h.getProviderByMessageID(rawID)
 	if err != nil {
-		slog.Error("update_message failed", "message_id", messageID, "error", err)
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Verify the sender is trusted
+	body, err := p.FetchMessage(messageID)
+	if err != nil {
+		slog.Error("update_message failed", "message_id", rawID, "error", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch message: %v", err)), nil
 	}
 
 	addr, err := security.SanitizeAddress(body.From)
 	if err != nil {
-		slog.Info("update_message", "message_id", messageID, "result", "denied_invalid_address")
+		slog.Info("update_message", "message_id", rawID, "result", "denied_invalid_address")
 		return mcp.NewToolResultError("Permission Denied: Cannot update messages from untrusted sender."), nil
 	}
 
 	trusted, err := h.isTrusted(addr)
 	if err != nil || !trusted {
-		slog.Info("update_message", "message_id", messageID, "sender", addr, "result", "denied")
+		slog.Info("update_message", "message_id", rawID, "sender", addr, "result", "denied")
 		return mcp.NewToolResultError("Permission Denied: Cannot update messages from untrusted sender."), nil
 	}
 
@@ -537,8 +670,8 @@ func (h *Handler) updateMessage(ctx context.Context, request mcp.CallToolRequest
 		return mcp.NewToolResultError("Provide at least one of 'read' or 'flagged' to update."), nil
 	}
 
-	if err := h.provider.UpdateMessage(messageID, read, flagged); err != nil {
-		slog.Error("update_message failed", "message_id", messageID, "error", err)
+	if err := p.UpdateMessage(messageID, read, flagged); err != nil {
+		slog.Error("update_message failed", "message_id", rawID, "error", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to update message: %v", err)), nil
 	}
 
@@ -558,8 +691,8 @@ func (h *Handler) updateMessage(ctx context.Context, request mcp.CallToolRequest
 		}
 	}
 
-	slog.Info("update_message", "message_id", messageID, "sender", addr, "updates", strings.Join(updates, ", "), "result", "updated")
-	return mcp.NewToolResultText(fmt.Sprintf("Message %s: %s.", messageID, strings.Join(updates, ", "))), nil
+	slog.Info("update_message", "message_id", rawID, "sender", addr, "updates", strings.Join(updates, ", "), "result", "updated")
+	return mcp.NewToolResultText(fmt.Sprintf("Message %s: %s.", rawID, strings.Join(updates, ", "))), nil
 }
 
 func (h *Handler) sendMail(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -588,17 +721,27 @@ func (h *Handler) sendMail(ctx context.Context, request mcp.CallToolRequest) (*m
 		cc = parseAddressList(ccRaw)
 	}
 
-	if err := h.provider.CreateDraft(to, cc, subject, body); err != nil {
-		slog.Error("send_mail failed", "error", err)
+	// Resolve account
+	accountName := request.GetString("account", "")
+	if accountName == "" {
+		accountName = h.accountOrder[0]
+	}
+	p, err := h.getProvider(accountName)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	if err := p.CreateDraft(to, cc, subject, body); err != nil {
+		slog.Error("send_mail failed", "account", accountName, "error", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to create draft: %v", err)), nil
 	}
 
-	slog.Info("send_mail", "to", to, "cc", cc, "subject", subject, "result", "draft_created")
-	return mcp.NewToolResultText(fmt.Sprintf("Draft created (to: %s, subject: %q). The message has been saved to Drafts for your review — it has NOT been sent.", strings.Join(to, ", "), subject)), nil
+	slog.Info("send_mail", "account", accountName, "to", to, "cc", cc, "subject", subject, "result", "draft_created")
+	return mcp.NewToolResultText(fmt.Sprintf("Draft created in %s (to: %s, subject: %q). The message has been saved to Drafts for your review — it has NOT been sent.", accountName, strings.Join(to, ", "), subject)), nil
 }
 
 func (h *Handler) replyMail(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	messageID, err := request.RequireString("message_id")
+	rawID, err := request.RequireString("message_id")
 	if err != nil {
 		return mcp.NewToolResultError("message_id is required"), nil
 	}
@@ -610,10 +753,15 @@ func (h *Handler) replyMail(ctx context.Context, request mcp.CallToolRequest) (*
 
 	replyAll := request.GetBool("reply_all", true)
 
-	// Fetch original message for headers
-	original, err := h.provider.FetchMessage(messageID)
+	p, accountName, messageID, err := h.getProviderByMessageID(rawID)
 	if err != nil {
-		slog.Error("reply_mail failed", "message_id", messageID, "error", err)
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Fetch original message for headers
+	original, err := p.FetchMessage(messageID)
+	if err != nil {
+		slog.Error("reply_mail failed", "message_id", rawID, "error", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch original message: %v", err)), nil
 	}
 
@@ -624,7 +772,7 @@ func (h *Handler) replyMail(ctx context.Context, request mcp.CallToolRequest) (*
 
 	trusted, err := h.isTrusted(addr)
 	if err != nil || !trusted {
-		slog.Info("reply_mail", "message_id", messageID, "sender", addr, "result", "denied")
+		slog.Info("reply_mail", "message_id", rawID, "sender", addr, "result", "denied")
 		return mcp.NewToolResultError("Permission Denied: Cannot reply to message from untrusted sender."), nil
 	}
 
@@ -637,7 +785,6 @@ func (h *Handler) replyMail(ctx context.Context, request mcp.CallToolRequest) (*
 
 	var cc []string
 	if replyAll {
-		// Add original To recipients (minus our own address, which we don't know here)
 		for _, a := range original.To {
 			if a != replyTo {
 				to = append(to, a)
@@ -663,13 +810,13 @@ func (h *Handler) replyMail(ctx context.Context, request mcp.CallToolRequest) (*
 		buf.WriteString("\n")
 	}
 
-	if err := h.provider.CreateDraft(to, cc, subject, buf.String()); err != nil {
-		slog.Error("reply_mail failed", "message_id", messageID, "error", err)
+	if err := p.CreateDraft(to, cc, subject, buf.String()); err != nil {
+		slog.Error("reply_mail failed", "message_id", rawID, "error", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to create reply draft: %v", err)), nil
 	}
 
-	slog.Info("reply_mail", "message_id", messageID, "to", to, "cc", cc, "reply_all", replyAll, "result", "draft_created")
-	return mcp.NewToolResultText(fmt.Sprintf("Reply draft created (to: %s, subject: %q). The message has been saved to Drafts for your review — it has NOT been sent.", strings.Join(to, ", "), subject)), nil
+	slog.Info("reply_mail", "account", accountName, "message_id", rawID, "to", to, "cc", cc, "reply_all", replyAll, "result", "draft_created")
+	return mcp.NewToolResultText(fmt.Sprintf("Reply draft created in %s (to: %s, subject: %q). The message has been saved to Drafts for your review — it has NOT been sent.", accountName, strings.Join(to, ", "), subject)), nil
 }
 
 // parseAddressList splits a comma-separated list of email addresses and trims whitespace.

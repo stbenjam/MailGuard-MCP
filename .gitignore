@@ -1,5 +1,5 @@
 # Binaries
-mailguard-mcp
+/mailguard-mcp
 *.exe
 *.dll
 *.so
