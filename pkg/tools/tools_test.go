@@ -127,6 +127,8 @@ func callTool(h *Handler, name string, args map[string]any) (*mcp.CallToolResult
 		return h.sendMail(ctx, req)
 	case "reply_mail":
 		return h.replyMail(ctx, req)
+	case "forward_mail":
+		return h.forwardMail(ctx, req)
 	}
 	return nil, fmt.Errorf("unknown tool: %s", name)
 }
@@ -918,6 +920,107 @@ func TestReplyMail_UsesReplyToHeader(t *testing.T) {
 	}
 	if mp.lastDraft.To[0] != "replies@example.com" {
 		t.Errorf("expected reply to go to Reply-To address, got: %v", mp.lastDraft.To)
+	}
+}
+
+func TestForwardMail(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {
+				MessageID: "msg1",
+				From:      "alice@example.com",
+				To:        []string{"me@example.com"},
+				Subject:   "Important info",
+				PlainText: "Here are the details.",
+			},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("alice@example.com")
+
+	result, _ := callTool(h, "forward_mail", map[string]any{
+		"message_id": "default:msg1",
+		"to":         "bob@example.com, carol@example.com",
+		"comment":    "FYI see below",
+	})
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(result))
+	}
+	if mp.lastDraft == nil {
+		t.Fatal("expected CreateDraft to be called")
+	}
+	if len(mp.lastDraft.To) != 2 || mp.lastDraft.To[0] != "bob@example.com" {
+		t.Errorf("unexpected To: %v", mp.lastDraft.To)
+	}
+	if !strings.HasPrefix(mp.lastDraft.Subject, "Fwd: ") {
+		t.Errorf("expected Fwd: prefix, got: %s", mp.lastDraft.Subject)
+	}
+	if !strings.Contains(mp.lastDraft.Body, "FYI see below") {
+		t.Error("expected comment in body")
+	}
+	if !strings.Contains(mp.lastDraft.Body, "Forwarded message") {
+		t.Error("expected forwarded message header")
+	}
+	if !strings.Contains(mp.lastDraft.Body, "Here are the details.") {
+		t.Error("expected original message body")
+	}
+}
+
+func TestForwardMail_UntrustedSender(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {
+				MessageID: "msg1",
+				From:      "stranger@example.com",
+				Subject:   "Suspicious",
+				PlainText: "Click here.",
+			},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+
+	result, _ := callTool(h, "forward_mail", map[string]any{
+		"message_id": "default:msg1",
+		"to":         "bob@example.com",
+	})
+
+	if !result.IsError {
+		t.Error("expected error for untrusted sender")
+	}
+	if !strings.Contains(resultText(result), "Permission Denied") {
+		t.Error("expected permission denied")
+	}
+}
+
+func TestForwardMail_ReadOnly(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {
+				MessageID: "msg1",
+				From:      "alice@example.com",
+				Subject:   "Hello",
+				PlainText: "Hi.",
+			},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("alice@example.com")
+	h.policy.Tools.ReadOnly = true
+
+	result, _ := callTool(h, "forward_mail", map[string]any{
+		"message_id": "default:msg1",
+		"to":         "bob@example.com",
+	})
+
+	if !result.IsError {
+		t.Error("expected error in read-only mode")
+	}
+	if !strings.Contains(resultText(result), "read-only") {
+		t.Error("expected read-only error message")
 	}
 }
 

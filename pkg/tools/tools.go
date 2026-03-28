@@ -231,6 +231,24 @@ func (h *Handler) Register(s *server.MCPServer) {
 	)
 
 	s.AddTool(
+		mcp.NewTool("forward_mail",
+			mcp.WithDescription("Forwards an email to new recipients and saves it as a draft for user review. Does NOT send the email. Only works for messages from trusted senders."),
+			mcp.WithString("message_id",
+				mcp.Required(),
+				mcp.Description("The message ID of the email to forward."),
+			),
+			mcp.WithString("to",
+				mcp.Required(),
+				mcp.Description("Comma-separated list of recipient email addresses."),
+			),
+			mcp.WithString("comment",
+				mcp.Description("Optional text to include above the forwarded message."),
+			),
+		),
+		h.forwardMail,
+	)
+
+	s.AddTool(
 		mcp.NewTool("trust_sender",
 			mcp.WithDescription("Adds an email address (or @domain.com for domain trust) to the trusted sender list."),
 			mcp.WithString("email_address",
@@ -822,6 +840,77 @@ func (h *Handler) replyMail(ctx context.Context, request mcp.CallToolRequest) (*
 
 	slog.Info("reply_mail", "account", accountName, "message_id", rawID, "to", to, "cc", cc, "reply_all", replyAll, "result", "draft_created")
 	return mcp.NewToolResultText(fmt.Sprintf("Reply draft created in %s (to: %s, subject: %q). The message has been saved to Drafts for your review — it has NOT been sent.", accountName, strings.Join(to, ", "), subject)), nil
+}
+
+func (h *Handler) forwardMail(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	rawID, err := request.RequireString("message_id")
+	if err != nil {
+		return mcp.NewToolResultError("message_id is required"), nil
+	}
+
+	toRaw, err := request.RequireString("to")
+	if err != nil {
+		return mcp.NewToolResultError("to is required"), nil
+	}
+	to := parseAddressList(toRaw)
+	if len(to) == 0 {
+		return mcp.NewToolResultError("at least one recipient is required"), nil
+	}
+
+	comment := request.GetString("comment", "")
+
+	if h.policy.Tools.ReadOnly {
+		return mcp.NewToolResultError("forward_mail is disabled in read-only mode"), nil
+	}
+
+	p, accountName, messageID, err := h.getProviderByMessageID(rawID)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	original, err := p.FetchMessage(messageID)
+	if err != nil {
+		slog.Error("forward_mail failed", "message_id", rawID, "error", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch original message: %v", err)), nil
+	}
+
+	addr, err := security.SanitizeAddress(original.From)
+	if err != nil {
+		return mcp.NewToolResultError("Permission Denied: Cannot forward message from untrusted sender."), nil
+	}
+
+	trusted, err := h.isTrusted(addr)
+	if err != nil || !trusted {
+		slog.Info("forward_mail", "message_id", rawID, "sender", addr, "result", "denied")
+		return mcp.NewToolResultError("Permission Denied: Cannot forward message from untrusted sender."), nil
+	}
+
+	// Build subject
+	subject := original.Subject
+	if !strings.HasPrefix(strings.ToLower(subject), "fwd:") {
+		subject = "Fwd: " + subject
+	}
+
+	// Build forwarded body
+	var buf strings.Builder
+	if comment != "" {
+		buf.WriteString(comment)
+		buf.WriteString("\n\n")
+	}
+	buf.WriteString("---------- Forwarded message ----------\n")
+	buf.WriteString(fmt.Sprintf("From: %s\n", original.From))
+	buf.WriteString(fmt.Sprintf("Subject: %s\n", original.Subject))
+	buf.WriteString(fmt.Sprintf("To: %s\n", strings.Join(original.To, ", ")))
+	buf.WriteString("\n")
+	buf.WriteString(original.PlainText)
+
+	if err := p.CreateDraft(to, nil, subject, buf.String()); err != nil {
+		slog.Error("forward_mail failed", "message_id", rawID, "error", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to create forward draft: %v", err)), nil
+	}
+
+	slog.Info("forward_mail", "account", accountName, "message_id", rawID, "to", to, "result", "draft_created")
+	return mcp.NewToolResultText(fmt.Sprintf("Forward draft created in %s (to: %s, subject: %q). The message has been saved to Drafts for your review — it has NOT been sent.", accountName, strings.Join(to, ", "), subject)), nil
 }
 
 // parseAddressList splits a comma-separated list of email addresses and trims whitespace.
