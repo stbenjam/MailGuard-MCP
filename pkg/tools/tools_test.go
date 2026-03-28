@@ -31,8 +31,9 @@ type mockProvider struct {
 	lastDraft      *mockDraft
 }
 
-func (m *mockProvider) Connect() error { return nil }
-func (m *mockProvider) Close() error   { return nil }
+func (m *mockProvider) Address() string { return "me@example.com" }
+func (m *mockProvider) Connect() error  { return nil }
+func (m *mockProvider) Close() error    { return nil }
 
 func (m *mockProvider) FetchMail(opts provider.FetchOptions) ([]provider.EmailEnvelope, error) {
 	m.lastFetchOpts = &opts

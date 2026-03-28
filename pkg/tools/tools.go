@@ -781,16 +781,21 @@ func (h *Handler) replyMail(ctx context.Context, request mcp.CallToolRequest) (*
 	if original.ReplyTo != "" {
 		replyTo = original.ReplyTo
 	}
+	self := strings.ToLower(p.Address())
 	to := []string{replyTo}
 
 	var cc []string
 	if replyAll {
 		for _, a := range original.To {
-			if a != replyTo {
+			if a != replyTo && strings.ToLower(a) != self {
 				to = append(to, a)
 			}
 		}
-		cc = original.CC
+		for _, a := range original.CC {
+			if strings.ToLower(a) != self {
+				cc = append(cc, a)
+			}
+		}
 	}
 
 	// Build subject

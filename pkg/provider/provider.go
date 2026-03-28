@@ -45,6 +45,9 @@ type SearchOptions struct {
 
 // MailProvider abstracts email access. Implementations exist for IMAP and (future) Gmail API.
 type MailProvider interface {
+	// Address returns the email address of this account.
+	Address() string
+
 	// Connect authenticates and establishes a session.
 	Connect() error
 

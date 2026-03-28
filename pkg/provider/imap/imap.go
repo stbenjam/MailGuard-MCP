@@ -27,6 +27,10 @@ func New(cfg *config.AccountConfig) *IMAPProvider {
 	return &IMAPProvider{config: cfg}
 }
 
+func (p *IMAPProvider) Address() string {
+	return p.config.IMAPUsername
+}
+
 func (p *IMAPProvider) Connect() error {
 	addr := fmt.Sprintf("%s:%d", p.config.IMAPHost, p.config.IMAPPort)
 
