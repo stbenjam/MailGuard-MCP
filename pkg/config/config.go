@@ -44,6 +44,8 @@ func LoadConfig() (*Config, error) {
 // LoadAccounts reads account definitions from a YAML file.
 // Passwords are resolved from environment variables referenced by imap_password_env.
 func LoadAccounts(path string) (map[string]*AccountConfig, error) {
+	_ = godotenv.Load()
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read accounts file: %w", err)
