@@ -14,6 +14,7 @@
 
 # Environment and local config
 .env
+accounts.yaml
 *.local.*
 
 # Trust store database
