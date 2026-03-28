@@ -21,9 +21,14 @@ type EmailEnvelope struct {
 }
 
 type EmailBody struct {
-	MessageID string
-	From      string
-	PlainText string
+	MessageID  string
+	From       string
+	To         []string
+	CC         []string
+	Subject    string
+	ReplyTo    string
+	References []string
+	PlainText  string
 }
 
 // FetchOptions controls which messages to retrieve.
@@ -55,6 +60,9 @@ type MailProvider interface {
 	// FetchAttachment retrieves an attachment by message ID and filename.
 	// Returns the raw content, content type, and any error.
 	FetchAttachment(messageID string, filename string) ([]byte, string, error)
+
+	// CreateDraft composes an RFC 822 message and appends it to the Drafts folder.
+	CreateDraft(to []string, cc []string, subject, body string) error
 
 	// UpdateMessage sets flags on a message. Nil values mean no change.
 	UpdateMessage(messageID string, read *bool, flagged *bool) error

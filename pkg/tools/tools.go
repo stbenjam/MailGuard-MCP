@@ -126,9 +126,49 @@ func (h *Handler) Register(s *server.MCPServer) {
 	)
 
 	if h.policy.Tools.ReadOnly {
-		slog.Info("read-only mode enabled: trust_sender, untrust_sender, and update_message tools are disabled")
+		slog.Info("read-only mode enabled: write tools are disabled")
 		return
 	}
+
+	s.AddTool(
+		mcp.NewTool("send_mail",
+			mcp.WithDescription("Composes an email and saves it as a draft for user review. Does NOT send the email."),
+			mcp.WithString("to",
+				mcp.Required(),
+				mcp.Description("Comma-separated list of recipient email addresses."),
+			),
+			mcp.WithString("cc",
+				mcp.Description("Comma-separated list of CC email addresses."),
+			),
+			mcp.WithString("subject",
+				mcp.Required(),
+				mcp.Description("The email subject line."),
+			),
+			mcp.WithString("body",
+				mcp.Required(),
+				mcp.Description("The plain-text email body."),
+			),
+		),
+		h.sendMail,
+	)
+
+	s.AddTool(
+		mcp.NewTool("reply_mail",
+			mcp.WithDescription("Composes a reply to an existing email and saves it as a draft for user review. Does NOT send the email. Only works for trusted senders."),
+			mcp.WithString("message_id",
+				mcp.Required(),
+				mcp.Description("The message ID of the email to reply to."),
+			),
+			mcp.WithString("body",
+				mcp.Required(),
+				mcp.Description("The plain-text reply body."),
+			),
+			mcp.WithBoolean("reply_all",
+				mcp.Description("Include all original recipients (To/CC) in the reply. Default: true."),
+			),
+		),
+		h.replyMail,
+	)
 
 	s.AddTool(
 		mcp.NewTool("trust_sender",
@@ -520,6 +560,128 @@ func (h *Handler) updateMessage(ctx context.Context, request mcp.CallToolRequest
 
 	slog.Info("update_message", "message_id", messageID, "sender", addr, "updates", strings.Join(updates, ", "), "result", "updated")
 	return mcp.NewToolResultText(fmt.Sprintf("Message %s: %s.", messageID, strings.Join(updates, ", "))), nil
+}
+
+func (h *Handler) sendMail(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	toRaw, err := request.RequireString("to")
+	if err != nil {
+		return mcp.NewToolResultError("to is required"), nil
+	}
+
+	subject, err := request.RequireString("subject")
+	if err != nil {
+		return mcp.NewToolResultError("subject is required"), nil
+	}
+
+	body, err := request.RequireString("body")
+	if err != nil {
+		return mcp.NewToolResultError("body is required"), nil
+	}
+
+	to := parseAddressList(toRaw)
+	if len(to) == 0 {
+		return mcp.NewToolResultError("at least one valid recipient is required"), nil
+	}
+
+	var cc []string
+	if ccRaw := request.GetString("cc", ""); ccRaw != "" {
+		cc = parseAddressList(ccRaw)
+	}
+
+	if err := h.provider.CreateDraft(to, cc, subject, body); err != nil {
+		slog.Error("send_mail failed", "error", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to create draft: %v", err)), nil
+	}
+
+	slog.Info("send_mail", "to", to, "cc", cc, "subject", subject, "result", "draft_created")
+	return mcp.NewToolResultText(fmt.Sprintf("Draft created (to: %s, subject: %q). The message has been saved to Drafts for your review — it has NOT been sent.", strings.Join(to, ", "), subject)), nil
+}
+
+func (h *Handler) replyMail(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	messageID, err := request.RequireString("message_id")
+	if err != nil {
+		return mcp.NewToolResultError("message_id is required"), nil
+	}
+
+	replyBody, err := request.RequireString("body")
+	if err != nil {
+		return mcp.NewToolResultError("body is required"), nil
+	}
+
+	replyAll := request.GetBool("reply_all", true)
+
+	// Fetch original message for headers
+	original, err := h.provider.FetchMessage(messageID)
+	if err != nil {
+		slog.Error("reply_mail failed", "message_id", messageID, "error", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch original message: %v", err)), nil
+	}
+
+	addr, err := security.SanitizeAddress(original.From)
+	if err != nil {
+		return mcp.NewToolResultError("Permission Denied: Cannot reply to message from untrusted sender."), nil
+	}
+
+	trusted, err := h.isTrusted(addr)
+	if err != nil || !trusted {
+		slog.Info("reply_mail", "message_id", messageID, "sender", addr, "result", "denied")
+		return mcp.NewToolResultError("Permission Denied: Cannot reply to message from untrusted sender."), nil
+	}
+
+	// Determine recipients
+	replyTo := addr
+	if original.ReplyTo != "" {
+		replyTo = original.ReplyTo
+	}
+	to := []string{replyTo}
+
+	var cc []string
+	if replyAll {
+		// Add original To recipients (minus our own address, which we don't know here)
+		for _, a := range original.To {
+			if a != replyTo {
+				to = append(to, a)
+			}
+		}
+		cc = original.CC
+	}
+
+	// Build subject
+	subject := original.Subject
+	if !strings.HasPrefix(strings.ToLower(subject), "re:") {
+		subject = "Re: " + subject
+	}
+
+	// Build reply body with quoted original
+	var buf strings.Builder
+	buf.WriteString(replyBody)
+	buf.WriteString("\n\n")
+	buf.WriteString("--- Original Message ---\n")
+	for _, line := range strings.Split(original.PlainText, "\n") {
+		buf.WriteString("> ")
+		buf.WriteString(line)
+		buf.WriteString("\n")
+	}
+
+	if err := h.provider.CreateDraft(to, cc, subject, buf.String()); err != nil {
+		slog.Error("reply_mail failed", "message_id", messageID, "error", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to create reply draft: %v", err)), nil
+	}
+
+	slog.Info("reply_mail", "message_id", messageID, "to", to, "cc", cc, "reply_all", replyAll, "result", "draft_created")
+	return mcp.NewToolResultText(fmt.Sprintf("Reply draft created (to: %s, subject: %q). The message has been saved to Drafts for your review — it has NOT been sent.", strings.Join(to, ", "), subject)), nil
+}
+
+// parseAddressList splits a comma-separated list of email addresses and trims whitespace.
+func parseAddressList(raw string) []string {
+	var addrs []string
+	for _, a := range strings.Split(raw, ",") {
+		a = strings.TrimSpace(a)
+		if a != "" {
+			addrs = append(addrs, a)
+		}
+	}
+	return addrs
 }
 
 // parseSince parses a duration string supporting "d" suffix for days in addition

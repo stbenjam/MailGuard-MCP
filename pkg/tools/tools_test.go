@@ -14,6 +14,13 @@ import (
 	"github.com/stbenjam/mailguard-mcp/pkg/truststore"
 )
 
+type mockDraft struct {
+	To      []string
+	CC      []string
+	Subject string
+	Body    string
+}
+
 type mockProvider struct {
 	envelopes      []provider.EmailEnvelope
 	bodies         map[string]*provider.EmailBody
@@ -21,6 +28,7 @@ type mockProvider struct {
 	lastFetchOpts  *provider.FetchOptions
 	lastSearchOpts *provider.SearchOptions
 	updatedFlags   map[string]map[string]*bool // messageID -> flag name -> value
+	lastDraft      *mockDraft
 }
 
 func (m *mockProvider) Connect() error { return nil }
@@ -51,6 +59,11 @@ func (m *mockProvider) UpdateMessage(messageID string, read *bool, flagged *bool
 		m.updatedFlags = make(map[string]map[string]*bool)
 	}
 	m.updatedFlags[messageID] = map[string]*bool{"read": read, "flagged": flagged}
+	return nil
+}
+
+func (m *mockProvider) CreateDraft(to []string, cc []string, subject, body string) error {
+	m.lastDraft = &mockDraft{To: to, CC: cc, Subject: subject, Body: body}
 	return nil
 }
 
@@ -108,6 +121,10 @@ func callTool(h *Handler, name string, args map[string]any) (*mcp.CallToolResult
 		return h.fetchAttachment(ctx, req)
 	case "update_message":
 		return h.updateMessage(ctx, req)
+	case "send_mail":
+		return h.sendMail(ctx, req)
+	case "reply_mail":
+		return h.replyMail(ctx, req)
 	}
 	return nil, fmt.Errorf("unknown tool: %s", name)
 }
@@ -715,5 +732,189 @@ func TestUpdateMessage_NoFlags(t *testing.T) {
 	}
 	if !strings.Contains(resultText(result), "Provide at least one") {
 		t.Error("expected hint about providing flags")
+	}
+}
+
+// --- send_mail tests ---
+
+func TestSendMail(t *testing.T) {
+	mp := &mockProvider{}
+	h := newTestHandler(t, mp)
+
+	result, _ := callTool(h, "send_mail", map[string]any{
+		"to":      "alice@example.com, bob@example.com",
+		"cc":      "carol@example.com",
+		"subject": "Meeting notes",
+		"body":    "Here are the notes from today.",
+	})
+	text := resultText(result)
+
+	if result.IsError {
+		t.Errorf("expected success, got error: %s", text)
+	}
+	if !strings.Contains(text, "Draft created") {
+		t.Error("expected draft creation confirmation")
+	}
+	if !strings.Contains(text, "NOT been sent") {
+		t.Error("expected NOT sent disclaimer")
+	}
+	if mp.lastDraft == nil {
+		t.Fatal("expected CreateDraft to be called")
+	}
+	if len(mp.lastDraft.To) != 2 || mp.lastDraft.To[0] != "alice@example.com" {
+		t.Errorf("unexpected To: %v", mp.lastDraft.To)
+	}
+	if len(mp.lastDraft.CC) != 1 || mp.lastDraft.CC[0] != "carol@example.com" {
+		t.Errorf("unexpected CC: %v", mp.lastDraft.CC)
+	}
+}
+
+func TestSendMail_MissingTo(t *testing.T) {
+	mp := &mockProvider{}
+	h := newTestHandler(t, mp)
+
+	result, _ := callTool(h, "send_mail", map[string]any{
+		"subject": "Hello",
+		"body":    "World",
+	})
+
+	if !result.IsError {
+		t.Error("expected error for missing to")
+	}
+}
+
+// --- reply_mail tests ---
+
+func TestReplyMail(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {
+				MessageID: "msg1",
+				From:      "alice@example.com",
+				To:        []string{"me@example.com"},
+				CC:        []string{"bob@example.com"},
+				Subject:   "Project update",
+				PlainText: "Here is the update.",
+			},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("alice@example.com")
+
+	result, _ := callTool(h, "reply_mail", map[string]any{
+		"message_id": "msg1",
+		"body":       "Thanks for the update!",
+	})
+	text := resultText(result)
+
+	if result.IsError {
+		t.Errorf("expected success, got error: %s", text)
+	}
+	if !strings.Contains(text, "Reply draft created") {
+		t.Error("expected reply draft confirmation")
+	}
+	if mp.lastDraft == nil {
+		t.Fatal("expected CreateDraft to be called")
+	}
+	// reply_all=true by default, so CC should include bob
+	if len(mp.lastDraft.CC) != 1 || mp.lastDraft.CC[0] != "bob@example.com" {
+		t.Errorf("expected CC to include bob, got: %v", mp.lastDraft.CC)
+	}
+	if mp.lastDraft.Subject != "Re: Project update" {
+		t.Errorf("expected Re: prefix, got: %s", mp.lastDraft.Subject)
+	}
+	if !strings.Contains(mp.lastDraft.Body, "> Here is the update.") {
+		t.Error("expected quoted original in reply body")
+	}
+}
+
+func TestReplyMail_NoReplyAll(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {
+				MessageID: "msg1",
+				From:      "alice@example.com",
+				To:        []string{"me@example.com"},
+				CC:        []string{"bob@example.com"},
+				Subject:   "Hello",
+				PlainText: "Hi there.",
+			},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("alice@example.com")
+
+	result, _ := callTool(h, "reply_mail", map[string]any{
+		"message_id": "msg1",
+		"body":       "Hi!",
+		"reply_all":  false,
+	})
+
+	if result.IsError {
+		t.Errorf("expected success, got error: %s", resultText(result))
+	}
+	if mp.lastDraft == nil {
+		t.Fatal("expected CreateDraft to be called")
+	}
+	// reply_all=false, so only the original sender
+	if len(mp.lastDraft.To) != 1 || mp.lastDraft.To[0] != "alice@example.com" {
+		t.Errorf("expected only alice in To, got: %v", mp.lastDraft.To)
+	}
+	if len(mp.lastDraft.CC) != 0 {
+		t.Errorf("expected no CC, got: %v", mp.lastDraft.CC)
+	}
+}
+
+func TestReplyMail_Untrusted(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {MessageID: "msg1", From: "untrusted@evil.com", PlainText: "Evil"},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+
+	result, _ := callTool(h, "reply_mail", map[string]any{
+		"message_id": "msg1",
+		"body":       "Replying",
+	})
+
+	if !result.IsError {
+		t.Error("expected error for untrusted sender")
+	}
+	if !strings.Contains(resultText(result), "Permission Denied") {
+		t.Error("expected permission denied")
+	}
+}
+
+func TestReplyMail_UsesReplyToHeader(t *testing.T) {
+	mp := &mockProvider{
+		bodies: map[string]*provider.EmailBody{
+			"msg1": {
+				MessageID: "msg1",
+				From:      "alice@example.com",
+				ReplyTo:   "replies@example.com",
+				Subject:   "Hello",
+				PlainText: "Hi.",
+			},
+		},
+	}
+
+	h := newTestHandler(t, mp)
+	h.trustStore.Add("alice@example.com")
+
+	callTool(h, "reply_mail", map[string]any{
+		"message_id": "msg1",
+		"body":       "Hi!",
+		"reply_all":  false,
+	})
+
+	if mp.lastDraft == nil {
+		t.Fatal("expected CreateDraft to be called")
+	}
+	if mp.lastDraft.To[0] != "replies@example.com" {
+		t.Errorf("expected reply to go to Reply-To address, got: %v", mp.lastDraft.To)
 	}
 }

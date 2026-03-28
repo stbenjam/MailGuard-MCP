@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -259,15 +260,51 @@ func (p *IMAPProvider) FetchMessage(messageID string) (*provider.EmailBody, erro
 		from = addrs[0].Address
 	}
 
+	var to []string
+	if addrs, err := mr.Header.AddressList("To"); err == nil {
+		for _, a := range addrs {
+			to = append(to, a.Address)
+		}
+	}
+
+	var cc []string
+	if addrs, err := mr.Header.AddressList("Cc"); err == nil {
+		for _, a := range addrs {
+			cc = append(cc, a.Address)
+		}
+	}
+
+	subject, _ := mr.Header.Subject()
+
+	replyTo := ""
+	if addrs, err := mr.Header.AddressList("Reply-To"); err == nil && len(addrs) > 0 {
+		replyTo = addrs[0].Address
+	}
+
+	var references []string
+	if refs := mr.Header.Get("References"); refs != "" {
+		for _, ref := range strings.Fields(refs) {
+			references = append(references, strings.Trim(ref, "<>"))
+		}
+	}
+	if inReplyTo := mr.Header.Get("In-Reply-To"); inReplyTo != "" {
+		references = append(references, strings.Trim(inReplyTo, "<>"))
+	}
+
 	plainText, err := extractPlainText(mr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract text: %w", err)
 	}
 
 	return &provider.EmailBody{
-		MessageID: messageID,
-		From:      from,
-		PlainText: plainText,
+		MessageID:  messageID,
+		From:       from,
+		To:         to,
+		CC:         cc,
+		Subject:    subject,
+		ReplyTo:    replyTo,
+		References: references,
+		PlainText:  plainText,
 	}, nil
 }
 
@@ -351,6 +388,36 @@ func partName(part *gomessage.Part) string {
 		}
 	}
 	return ""
+}
+
+func (p *IMAPProvider) CreateDraft(to []string, cc []string, subject, body string) error {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "From: %s\r\n", p.config.IMAPUsername)
+	fmt.Fprintf(&buf, "To: %s\r\n", strings.Join(to, ", "))
+	if len(cc) > 0 {
+		fmt.Fprintf(&buf, "Cc: %s\r\n", strings.Join(cc, ", "))
+	}
+	fmt.Fprintf(&buf, "Subject: %s\r\n", subject)
+	fmt.Fprintf(&buf, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
+	fmt.Fprintf(&buf, "MIME-Version: 1.0\r\n")
+	fmt.Fprintf(&buf, "Content-Type: text/plain; charset=UTF-8\r\n")
+	fmt.Fprintf(&buf, "\r\n")
+	buf.WriteString(body)
+
+	appendCmd := p.client.Append("Drafts", int64(buf.Len()), nil)
+	if _, err := appendCmd.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("failed to write draft: %w", err)
+	}
+	if err := appendCmd.Close(); err != nil {
+		return fmt.Errorf("failed to close draft append: %w", err)
+	}
+
+	if _, err := appendCmd.Wait(); err != nil {
+		return fmt.Errorf("failed to append draft: %w", err)
+	}
+
+	slog.Info("draft created", "to", to, "subject", subject)
+	return nil
 }
 
 func (p *IMAPProvider) UpdateMessage(messageID string, read *bool, flagged *bool) error {
