@@ -24,6 +24,8 @@ type AccountConfig struct {
 	IMAPTLS      bool   `yaml:"imap_tls"`
 	IMAPMailbox  string `yaml:"imap_mailbox"`
 
+	IMAPDraftsMailbox string `yaml:"imap_drafts_mailbox"`
+
 	// IMAPPasswordEnv is the name of the environment variable holding the password.
 	IMAPPasswordEnv string `yaml:"imap_password_env"`
 }
@@ -87,7 +89,8 @@ func DefaultAccountFromEnv() (map[string]*AccountConfig, error) {
 		IMAPUsername: os.Getenv("IMAP_USERNAME"),
 		IMAPPassword: os.Getenv("IMAP_PASSWORD"),
 		IMAPTLS:      getEnvBool("IMAP_TLS", true),
-		IMAPMailbox:  getEnv("IMAP_MAILBOX", "INBOX"),
+		IMAPMailbox:       getEnv("IMAP_MAILBOX", "INBOX"),
+		IMAPDraftsMailbox: getEnv("IMAP_DRAFTS_MAILBOX", "Drafts"),
 	}
 
 	if err := acct.validate("default"); err != nil {
@@ -106,6 +109,9 @@ func (a *AccountConfig) applyDefaults() error {
 	}
 	if a.IMAPMailbox == "" {
 		a.IMAPMailbox = "INBOX"
+	}
+	if a.IMAPDraftsMailbox == "" {
+		a.IMAPDraftsMailbox = "Drafts"
 	}
 	return nil
 }

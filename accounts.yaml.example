@@ -7,6 +7,7 @@ accounts:
     imap_username: you@gmail.com
     imap_password_env: PERSONAL_IMAP_PASSWORD
     imap_mailbox: INBOX
+    # imap_drafts_mailbox: "[Gmail]/Drafts"  # default: Drafts
 
   work:
     provider: imap
@@ -16,3 +17,4 @@ accounts:
     imap_username: you@company.com
     imap_password_env: WORK_IMAP_PASSWORD
     imap_mailbox: INBOX
+    # imap_drafts_mailbox: "[Gmail]/Drafts"  # default: Drafts

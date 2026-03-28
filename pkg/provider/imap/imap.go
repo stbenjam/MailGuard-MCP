@@ -404,7 +404,7 @@ func (p *IMAPProvider) CreateDraft(to []string, cc []string, subject, body strin
 	fmt.Fprintf(&buf, "\r\n")
 	buf.WriteString(body)
 
-	appendCmd := p.client.Append("Drafts", int64(buf.Len()), nil)
+	appendCmd := p.client.Append(p.config.IMAPDraftsMailbox, int64(buf.Len()), nil)
 	if _, err := appendCmd.Write(buf.Bytes()); err != nil {
 		return fmt.Errorf("failed to write draft: %w", err)
 	}
