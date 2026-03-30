@@ -13,6 +13,7 @@ type EmailEnvelope struct {
 	From            string
 	Subject         string
 	Date            time.Time
+	Folder          string
 	UID             uint32
 	ReplyTo         string
 	Attachments     []Attachment
@@ -51,6 +52,9 @@ type MailProvider interface {
 
 	// Connect authenticates and establishes a session.
 	Connect() error
+
+	// SelectFolder switches to the given mailbox folder.
+	SelectFolder(folder string) error
 
 	// ListFolders returns the names of all available mailbox folders.
 	ListFolders() ([]string, error)

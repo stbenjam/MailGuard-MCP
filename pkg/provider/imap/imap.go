@@ -19,8 +19,9 @@ import (
 )
 
 type IMAPProvider struct {
-	client *imapclient.Client
-	config *config.AccountConfig
+	client        *imapclient.Client
+	config        *config.AccountConfig
+	currentFolder string
 }
 
 func New(cfg *config.AccountConfig) *IMAPProvider {
@@ -97,19 +98,20 @@ func (p *IMAPProvider) SearchableFolders() ([]string, error) {
 	return folders, nil
 }
 
-// selectFolder switches to the given folder, or the default mailbox if empty.
-func (p *IMAPProvider) selectFolder(folder string) error {
+// SelectFolder switches to the given folder, or the default mailbox if empty.
+func (p *IMAPProvider) SelectFolder(folder string) error {
 	if folder == "" {
 		folder = p.config.IMAPMailbox
 	}
 	if _, err := p.client.Select(folder, nil).Wait(); err != nil {
 		return fmt.Errorf("failed to select folder %s: %w", folder, err)
 	}
+	p.currentFolder = folder
 	return nil
 }
 
 func (p *IMAPProvider) FetchMail(opts provider.FetchOptions) ([]provider.EmailEnvelope, error) {
-	if err := p.selectFolder(opts.Folder); err != nil {
+	if err := p.SelectFolder(opts.Folder); err != nil {
 		return nil, err
 	}
 	criteria := p.buildCriteria(opts)
@@ -117,7 +119,7 @@ func (p *IMAPProvider) FetchMail(opts provider.FetchOptions) ([]provider.EmailEn
 }
 
 func (p *IMAPProvider) SearchMail(opts provider.SearchOptions) ([]provider.EmailEnvelope, error) {
-	if err := p.selectFolder(opts.Folder); err != nil {
+	if err := p.SelectFolder(opts.Folder); err != nil {
 		return nil, err
 	}
 	criteria := p.buildCriteria(opts.FetchOptions)
@@ -243,6 +245,7 @@ func (p *IMAPProvider) fetchEnvelopes(uids []imap.UID) ([]provider.EmailEnvelope
 			From:            from,
 			Subject:         env.Subject,
 			Date:            env.Date,
+			Folder:          p.currentFolder,
 			UID:             uint32(msg.UID),
 			ReplyTo:         replyTo,
 			Attachments:     attachments,
