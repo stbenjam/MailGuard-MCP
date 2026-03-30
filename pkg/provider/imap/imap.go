@@ -538,14 +538,43 @@ func (p *IMAPProvider) fetchByMessageID(messageID string) (*imapclient.FetchMess
 		},
 	}
 
+	// First try the currently selected folder
+	msg, err := p.searchCurrentFolder(criteria)
+	if err == nil {
+		return msg, nil
+	}
+
+	// Fall back to searching all searchable folders
+	folders, err := p.SearchableFolders()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list folders: %w", err)
+	}
+
+	for _, folder := range folders {
+		if folder == p.currentFolder {
+			continue // already tried
+		}
+		if err := p.SelectFolder(folder); err != nil {
+			continue
+		}
+		msg, err := p.searchCurrentFolder(criteria)
+		if err == nil {
+			return msg, nil
+		}
+	}
+
+	return nil, fmt.Errorf("message with ID %q not found in any folder", messageID)
+}
+
+func (p *IMAPProvider) searchCurrentFolder(criteria *imap.SearchCriteria) (*imapclient.FetchMessageBuffer, error) {
 	searchData, err := p.client.UIDSearch(criteria, nil).Wait()
 	if err != nil {
-		return nil, fmt.Errorf("failed to search for message: %w", err)
+		return nil, err
 	}
 
 	uids := searchData.AllUIDs()
 	if len(uids) == 0 {
-		return nil, fmt.Errorf("message with ID %q not found", messageID)
+		return nil, fmt.Errorf("not found")
 	}
 
 	fetchOpts := &imap.FetchOptions{
@@ -555,11 +584,11 @@ func (p *IMAPProvider) fetchByMessageID(messageID string) (*imapclient.FetchMess
 
 	messages, err := p.client.Fetch(imap.UIDSetNum(uids[0]), fetchOpts).Collect()
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch message: %w", err)
+		return nil, err
 	}
 
 	if len(messages) == 0 {
-		return nil, fmt.Errorf("message not found")
+		return nil, fmt.Errorf("not found")
 	}
 
 	return messages[0], nil
