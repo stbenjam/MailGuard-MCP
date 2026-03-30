@@ -61,12 +61,65 @@ func (p *IMAPProvider) Connect() error {
 	return nil
 }
 
+func (p *IMAPProvider) ListFolders() ([]string, error) {
+	listCmd := p.client.List("", "*", nil)
+	var folders []string
+	for {
+		mbox := listCmd.Next()
+		if mbox == nil {
+			break
+		}
+		folders = append(folders, mbox.Mailbox)
+	}
+	if err := listCmd.Close(); err != nil {
+		return nil, fmt.Errorf("failed to list folders: %w", err)
+	}
+	return folders, nil
+}
+
+func (p *IMAPProvider) SearchableFolders() ([]string, error) {
+	all, err := p.ListFolders()
+	if err != nil {
+		return nil, err
+	}
+
+	excluded := make(map[string]bool, len(p.config.IMAPExcludeFolders))
+	for _, f := range p.config.IMAPExcludeFolders {
+		excluded[strings.ToLower(f)] = true
+	}
+
+	var folders []string
+	for _, f := range all {
+		if !excluded[strings.ToLower(f)] {
+			folders = append(folders, f)
+		}
+	}
+	return folders, nil
+}
+
+// selectFolder switches to the given folder, or the default mailbox if empty.
+func (p *IMAPProvider) selectFolder(folder string) error {
+	if folder == "" {
+		folder = p.config.IMAPMailbox
+	}
+	if _, err := p.client.Select(folder, nil).Wait(); err != nil {
+		return fmt.Errorf("failed to select folder %s: %w", folder, err)
+	}
+	return nil
+}
+
 func (p *IMAPProvider) FetchMail(opts provider.FetchOptions) ([]provider.EmailEnvelope, error) {
+	if err := p.selectFolder(opts.Folder); err != nil {
+		return nil, err
+	}
 	criteria := p.buildCriteria(opts)
 	return p.searchAndFetch(criteria)
 }
 
 func (p *IMAPProvider) SearchMail(opts provider.SearchOptions) ([]provider.EmailEnvelope, error) {
+	if err := p.selectFolder(opts.Folder); err != nil {
+		return nil, err
+	}
 	criteria := p.buildCriteria(opts.FetchOptions)
 	if opts.Query != "" {
 		criteria.Text = []string{opts.Query}

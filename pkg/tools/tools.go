@@ -115,8 +115,21 @@ func (h *Handler) Register(s *server.MCPServer) {
 	}
 
 	s.AddTool(
+		mcp.NewTool("list_folders",
+			mcp.WithDescription("Lists all available mailbox folders for an account."),
+			mcp.WithString("account",
+				mcp.Description("List folders for a specific account. If omitted, lists folders for all accounts."+accountDesc),
+			),
+		),
+		h.listFolders,
+	)
+
+	s.AddTool(
 		mcp.NewTool("fetch_mail",
-			mcp.WithDescription("Fetches emails from the inbox. Trusted senders show full details; untrusted senders show only a sanitized address."),
+			mcp.WithDescription("Fetches emails from a mailbox folder. Trusted senders show full details; untrusted senders show only a sanitized address."),
+			mcp.WithString("folder",
+				mcp.Description("Mailbox folder to fetch from. Use list_folders to see available folders. Default: configured inbox."),
+			),
 			mcp.WithString("since",
 				mcp.Description("How far back to fetch mail. Examples: \"1h\", \"24h\", \"7d\", \"30d\". Default: \"24h\"."),
 			),
@@ -135,10 +148,13 @@ func (h *Handler) Register(s *server.MCPServer) {
 
 	s.AddTool(
 		mcp.NewTool("search_mail",
-			mcp.WithDescription("Searches emails by query. Trusted senders show full details; untrusted senders show only a sanitized address."),
+			mcp.WithDescription("Searches emails by query in a mailbox folder. Trusted senders show full details; untrusted senders show only a sanitized address."),
 			mcp.WithString("query",
 				mcp.Required(),
 				mcp.Description("Search terms to match against subject, body, and sender."),
+			),
+			mcp.WithString("folder",
+				mcp.Description("Mailbox folder to search in. Use list_folders to see available folders. Default: configured inbox."),
 			),
 			mcp.WithString("since",
 				mcp.Description("How far back to search. Examples: \"1h\", \"24h\", \"7d\", \"30d\". Default: \"7d\"."),
@@ -288,6 +304,37 @@ func (h *Handler) Register(s *server.MCPServer) {
 	)
 }
 
+func (h *Handler) listFolders(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	accountFilter := request.GetString("account", "")
+
+	accounts, err := h.resolveAccounts(accountFilter)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	var buf strings.Builder
+	for _, name := range accounts {
+		p := h.providers[name]
+		folders, err := p.ListFolders()
+		if err != nil {
+			slog.Error("list_folders failed", "account", name, "error", err)
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list folders for %s: %v", name, err)), nil
+		}
+
+		if len(h.providers) > 1 {
+			buf.WriteString(fmt.Sprintf("## %s\n", name))
+		}
+		for _, f := range folders {
+			buf.WriteString(fmt.Sprintf("- %s\n", f))
+		}
+		if len(h.providers) > 1 {
+			buf.WriteString("\n")
+		}
+	}
+
+	return mcp.NewToolResultText(buf.String()), nil
+}
+
 func (h *Handler) fetchMail(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	since, err := parseSince(request.GetString("since", "24h"))
 	if err != nil {
@@ -296,7 +343,9 @@ func (h *Handler) fetchMail(ctx context.Context, request mcp.CallToolRequest) (*
 
 	includeRead := request.GetBool("read", false)
 
-	opts := provider.FetchOptions{
+	folder := request.GetString("folder", "")
+
+	baseOpts := provider.FetchOptions{
 		Since:       time.Now().Add(-since),
 		IncludeRead: includeRead,
 	}
@@ -311,13 +360,23 @@ func (h *Handler) fetchMail(ctx context.Context, request mcp.CallToolRequest) (*
 
 	var allEnvelopes []accountEnvelope
 	for _, name := range accounts {
-		envelopes, err := h.providers[name].FetchMail(opts)
+		p := h.providers[name]
+		folders, err := h.resolveFolders(p, folder)
 		if err != nil {
-			slog.Error("fetch_mail failed", "account", name, "error", err)
+			slog.Error("fetch_mail failed to resolve folders", "account", name, "error", err)
 			continue
 		}
-		for i := range envelopes {
-			allEnvelopes = append(allEnvelopes, accountEnvelope{account: name, envelope: envelopes[i]})
+		for _, f := range folders {
+			opts := baseOpts
+			opts.Folder = f
+			envelopes, err := p.FetchMail(opts)
+			if err != nil {
+				slog.Error("fetch_mail failed", "account", name, "folder", f, "error", err)
+				continue
+			}
+			for i := range envelopes {
+				allEnvelopes = append(allEnvelopes, accountEnvelope{account: name, envelope: envelopes[i]})
+			}
 		}
 	}
 
@@ -356,8 +415,9 @@ func (h *Handler) searchMail(ctx context.Context, request mcp.CallToolRequest) (
 	}
 
 	includeRead := request.GetBool("read", true)
+	folder := request.GetString("folder", "")
 
-	opts := provider.SearchOptions{
+	baseOpts := provider.SearchOptions{
 		FetchOptions: provider.FetchOptions{
 			Since:       time.Now().Add(-since),
 			IncludeRead: includeRead,
@@ -375,13 +435,23 @@ func (h *Handler) searchMail(ctx context.Context, request mcp.CallToolRequest) (
 
 	var allEnvelopes []accountEnvelope
 	for _, name := range accounts {
-		envelopes, err := h.providers[name].SearchMail(opts)
+		p := h.providers[name]
+		folders, err := h.resolveFolders(p, folder)
 		if err != nil {
-			slog.Error("search_mail failed", "account", name, "error", err)
+			slog.Error("search_mail failed to resolve folders", "account", name, "error", err)
 			continue
 		}
-		for i := range envelopes {
-			allEnvelopes = append(allEnvelopes, accountEnvelope{account: name, envelope: envelopes[i]})
+		for _, f := range folders {
+			opts := baseOpts
+			opts.Folder = f
+			envelopes, err := p.SearchMail(opts)
+			if err != nil {
+				slog.Error("search_mail failed", "account", name, "folder", f, "error", err)
+				continue
+			}
+			for i := range envelopes {
+				allEnvelopes = append(allEnvelopes, accountEnvelope{account: name, envelope: envelopes[i]})
+			}
 		}
 	}
 
@@ -423,6 +493,16 @@ func (h *Handler) resolveAccounts(filter string) ([]string, error) {
 		return nil, fmt.Errorf("unknown account: %q (available: %s)", filter, strings.Join(h.accountOrder, ", "))
 	}
 	return []string{filter}, nil
+}
+
+// resolveFolders returns the list of folders to search. If a specific folder is
+// given, it returns just that folder. Otherwise it returns all searchable folders
+// (all folders minus the configured exclude list).
+func (h *Handler) resolveFolders(p provider.MailProvider, folder string) ([]string, error) {
+	if folder != "" {
+		return []string{folder}, nil
+	}
+	return p.SearchableFolders()
 }
 
 func (h *Handler) formatAccountEnvelopes(envelopes []accountEnvelope) string {

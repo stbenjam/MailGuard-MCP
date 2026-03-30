@@ -33,6 +33,7 @@ type EmailBody struct {
 
 // FetchOptions controls which messages to retrieve.
 type FetchOptions struct {
+	Folder      string    // Mailbox folder to query. Empty means use the default configured mailbox.
 	Since       time.Time // Only return messages since this time. Zero value means no lower bound.
 	IncludeRead bool      // If true, include already-read messages. Default false (unread only).
 }
@@ -50,6 +51,13 @@ type MailProvider interface {
 
 	// Connect authenticates and establishes a session.
 	Connect() error
+
+	// ListFolders returns the names of all available mailbox folders.
+	ListFolders() ([]string, error)
+
+	// SearchableFolders returns folders eligible for cross-folder search
+	// (all folders minus the configured exclude list).
+	SearchableFolders() ([]string, error)
 
 	// FetchMail returns envelopes matching the given options.
 	FetchMail(opts FetchOptions) ([]EmailEnvelope, error)

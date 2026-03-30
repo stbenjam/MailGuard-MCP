@@ -24,7 +24,8 @@ type AccountConfig struct {
 	IMAPTLS      bool   `yaml:"imap_tls"`
 	IMAPMailbox  string `yaml:"imap_mailbox"`
 
-	IMAPDraftsMailbox string `yaml:"imap_drafts_mailbox"`
+	IMAPDraftsMailbox  string   `yaml:"imap_drafts_mailbox"`
+	IMAPExcludeFolders []string `yaml:"imap_exclude_folders"`
 
 	// IMAPPasswordEnv is the name of the environment variable holding the password.
 	IMAPPasswordEnv string `yaml:"imap_password_env"`
@@ -112,6 +113,9 @@ func (a *AccountConfig) applyDefaults() error {
 	}
 	if a.IMAPDraftsMailbox == "" {
 		a.IMAPDraftsMailbox = "Drafts"
+	}
+	if len(a.IMAPExcludeFolders) == 0 {
+		a.IMAPExcludeFolders = []string{"Trash", "Spam", "Junk", "Drafts", "Sent"}
 	}
 	return nil
 }

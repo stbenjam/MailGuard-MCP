@@ -8,6 +8,9 @@ accounts:
     imap_password_env: PERSONAL_IMAP_PASSWORD
     imap_mailbox: INBOX
     # imap_drafts_mailbox: "[Gmail]/Drafts"  # default: Drafts
+    # imap_exclude_folders:  # folders excluded from cross-folder search
+    #   - Trash              # default: Trash, Spam, Junk, Drafts, Sent
+    #   - Spam
 
   work:
     provider: imap

@@ -31,9 +31,15 @@ type mockProvider struct {
 	lastDraft      *mockDraft
 }
 
-func (m *mockProvider) Address() string { return "me@example.com" }
-func (m *mockProvider) Connect() error  { return nil }
-func (m *mockProvider) Close() error    { return nil }
+func (m *mockProvider) Address() string                { return "me@example.com" }
+func (m *mockProvider) Connect() error                 { return nil }
+func (m *mockProvider) Close() error                   { return nil }
+func (m *mockProvider) ListFolders() ([]string, error) {
+	return []string{"INBOX", "Sent", "Drafts", "Trash", "Archive"}, nil
+}
+func (m *mockProvider) SearchableFolders() ([]string, error) {
+	return []string{"INBOX", "Archive"}, nil
+}
 
 func (m *mockProvider) FetchMail(opts provider.FetchOptions) ([]provider.EmailEnvelope, error) {
 	m.lastFetchOpts = &opts
@@ -129,6 +135,8 @@ func callTool(h *Handler, name string, args map[string]any) (*mcp.CallToolResult
 		return h.replyMail(ctx, req)
 	case "forward_mail":
 		return h.forwardMail(ctx, req)
+	case "list_folders":
+		return h.listFolders(ctx, req)
 	}
 	return nil, fmt.Errorf("unknown tool: %s", name)
 }
@@ -140,6 +148,25 @@ func resultText(r *mcp.CallToolResult) string {
 		}
 	}
 	return ""
+}
+
+// --- list_folders tests ---
+
+func TestListFolders(t *testing.T) {
+	mp := &mockProvider{}
+	h := newTestHandler(t, mp)
+
+	result, _ := callTool(h, "list_folders", map[string]any{})
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", resultText(result))
+	}
+	text := resultText(result)
+	for _, folder := range []string{"INBOX", "Sent", "Drafts", "Archive"} {
+		if !strings.Contains(text, folder) {
+			t.Errorf("expected folder %q in output", folder)
+		}
+	}
 }
 
 // --- fetch_mail tests ---
