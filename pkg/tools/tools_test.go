@@ -190,14 +190,17 @@ func TestFetchMail_TrustedAndUntrusted(t *testing.T) {
 
 	text := resultText(result)
 
-	if !strings.Contains(text, "From: trusted@example.com") {
+	if !strings.Contains(text, `"from": "trusted@example.com"`) {
 		t.Error("expected trusted sender details")
 	}
-	if !strings.Contains(text, "Subject: Hello") {
+	if !strings.Contains(text, `"subject": "Hello"`) {
 		t.Error("expected subject for trusted sender")
 	}
-	if !strings.Contains(text, "<untrusted_sender>untrusted@evil.com</untrusted_sender>") {
-		t.Error("expected untrusted sender in tags")
+	if !strings.Contains(text, `"from": "untrusted@evil.com"`) {
+		t.Error("expected untrusted sender in output")
+	}
+	if !strings.Contains(text, `"trusted": false`) {
+		t.Error("expected untrusted flag")
 	}
 	if strings.Contains(text, "Phishing") {
 		t.Error("untrusted sender subject should be redacted")
@@ -256,7 +259,7 @@ func TestFetchMail_ReplyToWarning(t *testing.T) {
 	result, _ := callTool(h, "fetch_mail", nil)
 	text := resultText(result)
 
-	if !strings.Contains(text, "WARNING: Reply-To") {
+	if !strings.Contains(text, "Reply-To") && !strings.Contains(text, "reply_to_warning") {
 		t.Error("expected Reply-To warning")
 	}
 }
@@ -294,8 +297,8 @@ func TestFetchMail_Limit(t *testing.T) {
 	if !strings.Contains(text, "Results limited to 3 messages") {
 		t.Error("expected truncation notice")
 	}
-	// Should have exactly 3 "From:" lines
-	count := strings.Count(text, "From: trusted@example.com")
+	// Should have exactly 3 entries
+	count := strings.Count(text, `"from": "trusted@example.com"`)
 	if count != 3 {
 		t.Errorf("expected 3 results, got %d", count)
 	}
@@ -377,14 +380,14 @@ func TestSearchMail_TrustedAndUntrusted(t *testing.T) {
 	result, _ := callTool(h, "search_mail", map[string]any{"query": "invoice"})
 	text := resultText(result)
 
-	if !strings.Contains(text, "Subject: Invoice #123") {
+	if !strings.Contains(text, `"subject": "Invoice #123"`) {
 		t.Error("expected trusted sender subject in results")
 	}
 	if strings.Contains(text, "Fake invoice") {
 		t.Error("untrusted sender subject should be redacted in search results")
 	}
-	if !strings.Contains(text, "<untrusted_sender>untrusted@evil.com</untrusted_sender>") {
-		t.Error("expected untrusted sender in tags")
+	if !strings.Contains(text, `"from": "untrusted@evil.com"`) {
+		t.Error("expected untrusted sender in output")
 	}
 }
 
@@ -413,10 +416,10 @@ func TestFetchMail_BulkMailIndicator(t *testing.T) {
 	result, _ := callTool(h, "fetch_mail", nil)
 	text := resultText(result)
 
-	if !strings.Contains(text, "[Bulk/List mail]") {
+	if !strings.Contains(text, `"is_bulk": true`) {
 		t.Error("expected bulk mail indicator")
 	}
-	if !strings.Contains(text, "Unsubscribe: https://example.com/unsub") {
+	if !strings.Contains(text, `"unsubscribe": "https://example.com/unsub"`) {
 		t.Error("expected unsubscribe URL")
 	}
 }
@@ -719,11 +722,11 @@ func TestFetchMail_TrustDisabled(t *testing.T) {
 	result, _ := callTool(h, "fetch_mail", nil)
 	text := resultText(result)
 
-	if !strings.Contains(text, "Subject: Secret Plans") {
+	if !strings.Contains(text, `"subject": "Secret Plans"`) {
 		t.Error("expected full details when trust is disabled")
 	}
-	if strings.Contains(text, "<untrusted_sender>") {
-		t.Error("should not have untrusted_sender tags when trust is disabled")
+	if !strings.Contains(text, `"trusted": true`) {
+		t.Error("should be trusted when trust is disabled")
 	}
 }
 
@@ -1088,18 +1091,18 @@ func TestFetchMail_MultiAccount(t *testing.T) {
 	if !strings.Contains(text, "Work mail") {
 		t.Error("expected work mail")
 	}
-	// Message IDs should be present (no longer prefixed)
-	if !strings.Contains(text, "MessageID: p1") {
+	// Message IDs should be present
+	if !strings.Contains(text, `"message_id": "p1"`) {
 		t.Error("expected personal message ID")
 	}
-	if !strings.Contains(text, "MessageID: w1") {
+	if !strings.Contains(text, `"message_id": "w1"`) {
 		t.Error("expected work message ID")
 	}
 	// Multi-account should show account labels
-	if !strings.Contains(text, "Account: personal") {
+	if !strings.Contains(text, `"account": "personal"`) {
 		t.Error("expected account label for personal")
 	}
-	if !strings.Contains(text, "Account: work") {
+	if !strings.Contains(text, `"account": "work"`) {
 		t.Error("expected account label for work")
 	}
 }

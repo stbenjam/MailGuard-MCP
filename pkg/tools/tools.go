@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -535,14 +536,29 @@ func (h *Handler) resolveFolders(p provider.MailProvider, folder string) ([]stri
 	return p.SearchableFolders()
 }
 
+// emailResult is the JSON structure returned by fetch_mail and search_mail.
+type emailResult struct {
+	MessageID   string   `json:"message_id"`
+	From        string   `json:"from"`
+	Subject     string   `json:"subject,omitempty"`
+	Date        string   `json:"date"`
+	Folder      string   `json:"folder"`
+	Account     string   `json:"account,omitempty"`
+	Trusted     bool     `json:"trusted"`
+	IsBulk      bool     `json:"is_bulk,omitempty"`
+	Unsubscribe string   `json:"unsubscribe,omitempty"`
+	Attachments []string `json:"attachments,omitempty"`
+	ReplyTo     string   `json:"reply_to_warning,omitempty"`
+}
+
 func (h *Handler) formatAccountEnvelopes(envelopes []accountEnvelope) string {
 	multiAccount := len(h.providers) > 1
-	var lines []string
+	var results []emailResult
+
 	for _, ae := range envelopes {
 		addr, err := security.SanitizeAddress(ae.envelope.From)
 		if err != nil {
-			lines = append(lines, fmt.Sprintf("<untrusted_sender>[invalid address]</untrusted_sender> | MessageID: %s | Folder: %s", ae.envelope.MessageID, ae.envelope.Folder))
-			continue
+			addr = "[invalid address]"
 		}
 
 		trusted, err := h.isTrusted(addr)
@@ -551,53 +567,55 @@ func (h *Handler) formatAccountEnvelopes(envelopes []accountEnvelope) string {
 			trusted = false
 		}
 
-		if trusted {
-			line := fmt.Sprintf("From: %s | Subject: %s | Date: %s | MessageID: %s | Folder: %s",
-				addr,
-				h.filterContent(ae.envelope.Subject),
-				ae.envelope.Date.Format("2006-01-02T15:04:05Z"),
-				ae.envelope.MessageID,
-				ae.envelope.Folder,
-			)
+		r := emailResult{
+			MessageID: ae.envelope.MessageID,
+			From:      addr,
+			Date:      ae.envelope.Date.Format("2006-01-02T15:04:05Z"),
+			Folder:    ae.envelope.Folder,
+			Trusted:   trusted,
+		}
 
-			if multiAccount {
-				line += fmt.Sprintf(" | Account: %s", ae.account)
-			}
+		if multiAccount {
+			r.Account = ae.account
+		}
+
+		if trusted {
+			r.Subject = h.filterContent(ae.envelope.Subject)
 
 			if ae.envelope.IsBulk {
-				line += " | [Bulk/List mail]"
+				r.IsBulk = true
 			}
 
 			if ae.envelope.ListUnsubscribe != "" {
-				line += fmt.Sprintf(" | Unsubscribe: %s", ae.envelope.ListUnsubscribe)
+				r.Unsubscribe = ae.envelope.ListUnsubscribe
 			}
 
 			if len(ae.envelope.Attachments) > 0 {
-				var attachInfo []string
 				for _, att := range ae.envelope.Attachments {
-					attachInfo = append(attachInfo, fmt.Sprintf("%s (%s, %s)",
+					r.Attachments = append(r.Attachments, fmt.Sprintf("%s (%s, %s)",
 						security.SanitizeFilename(att.Filename),
 						att.ContentType,
 						formatSize(att.Size),
 					))
 				}
-				line += " | Attachments: " + strings.Join(attachInfo, ", ")
 			}
 
 			if ae.envelope.ReplyTo != "" {
 				replyAddr, err := security.SanitizeAddress(ae.envelope.ReplyTo)
 				if err == nil && replyAddr != addr {
-					line += fmt.Sprintf(" | [WARNING: Reply-To (%s) differs from From]", replyAddr)
+					r.ReplyTo = fmt.Sprintf("Reply-To (%s) differs from From", replyAddr)
 				}
 			}
-
-			lines = append(lines, line)
-		} else {
-			lines = append(lines, fmt.Sprintf("<untrusted_sender>%s</untrusted_sender> | MessageID: %s | Folder: %s", addr, ae.envelope.MessageID, ae.envelope.Folder))
 		}
+
+		results = append(results, r)
 	}
 
-	return strings.Join(lines, "\n")
+	data, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("Error formatting results: %v", err)
+	}
+	return string(data)
 }
 
 func (h *Handler) trustSender(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
